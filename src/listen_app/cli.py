@@ -13,9 +13,9 @@ Controls:
 """
 
 import argparse
-import os
 import sys
 import threading
+from pathlib import Path
 from typing import Optional
 
 from .runtime_env import ensure_utf8_runtime
@@ -24,16 +24,108 @@ ensure_utf8_runtime()
 
 from pynput import keyboard
 from rich.console import Console
+from rich.markup import escape as rich_escape
 from rich.panel import Panel
 from rich.live import Live
 from rich.text import Text
 
 from .clipboard_copy import copy_plain_text
+from .hotkey import HotkeyBinding, format_hotkey_examples
 from .recorder import AudioRecorder
+from .settings import ListenSettings
 from .transcriber import Transcriber, ModelSize
 
 
 console = Console()
+
+
+def _configure_settings_interactive() -> ListenSettings:
+    settings = ListenSettings.load()
+    console.print(
+        Panel(
+            "[bold]Configuração do modo rápido[/bold]\n\n"
+            "Defina o atalho global e onde salvar as transcrições.\n"
+            f"Exemplos: {', '.join(format_hotkey_examples())}",
+            border_style="blue",
+        )
+    )
+
+    current = settings.hotkey
+    raw = console.input(
+        f"Atalho global [{current}]: ",
+        markup=False,
+    ).strip()
+    if raw:
+        try:
+            HotkeyBinding.parse(raw)
+            settings.hotkey = raw
+        except ValueError as exc:
+            console.print(f"[red]Atalho inválido: {exc}[/red]")
+            sys.exit(1)
+
+    current_dir = settings.save_directory
+    raw_dir = console.input(
+        f"Pasta para salvar .txt [{current_dir}]: ",
+        markup=False,
+    ).strip()
+    if raw_dir:
+        settings.save_directory = raw_dir
+
+    corner = console.input(
+        f"Janela no canto inferior direito? [{'S' if settings.corner_mode else 'N'}]: ",
+        markup=False,
+    ).strip().lower()
+    if corner in ("s", "sim", "y", "yes"):
+        settings.corner_mode = True
+    elif corner in ("n", "nao", "não", "no"):
+        settings.corner_mode = False
+
+    path = settings.save()
+    save_dir = rich_escape(str(settings.resolved_save_directory()))
+    config_path = rich_escape(str(path))
+    console.print(f"[green]✓[/green] Configuração salva em [cyan]{config_path}[/cyan]")
+    console.print(
+        f"Atalho: [cyan]{settings.hotkey}[/cyan] • "
+        f"Salvar em: [cyan]{save_dir}[/cyan]"
+    )
+    return settings
+
+
+def _print_settings(settings: ListenSettings) -> None:
+    save_dir = rich_escape(str(settings.resolved_save_directory()))
+    console.print(
+        Panel(
+            f"Atalho: [cyan]{settings.hotkey}[/cyan]\n"
+            f"Pasta de gravações: [cyan]{save_dir}[/cyan]\n"
+            f"Canto inferior direito: [cyan]{'sim' if settings.corner_mode else 'não'}[/cyan]\n"
+            f"Gravar ao abrir: [cyan]{'sim' if settings.auto_record else 'não'}[/cyan]\n"
+            f"Salvar transcrições: [cyan]{'sim' if settings.save_transcriptions else 'não'}[/cyan]\n"
+            f"Copiar automaticamente: [cyan]{'sim' if settings.auto_copy else 'não'}[/cyan]",
+            title="[bold blue]Listen — configuração[/bold blue]",
+            border_style="blue",
+        )
+    )
+
+
+def _run_quick_gui(
+    model_size: Optional[ModelSize],
+    settings: ListenSettings,
+    *,
+    daemon: bool,
+    auto_copy: bool,
+) -> None:
+    from .gui import run_gui
+
+    run_gui(
+        model_size=model_size,
+        auto_copy=auto_copy,
+        corner_mode=settings.corner_mode,
+        auto_start_recording=settings.auto_record and not daemon,
+        save_transcriptions=settings.save_transcriptions,
+        save_directory=settings.resolved_save_directory(),
+        start_hidden=daemon,
+        global_hotkey=settings.hotkey if daemon else None,
+    )
 
 
 class ListenApp:
@@ -255,9 +347,67 @@ def main():
 Examples:
     listen                      Start GUI (default)
     listen --cli                Use terminal interface
-    listen --cli --toggle       Terminal with toggle mode
+    listen --quick              Modo rápido (canto + gravação + salvar .txt)
+    listen --daemon             Atalho global em segundo plano
+    listen --configure          Configurar atalho e pasta de salvamento
     listen --model small        Use the 'small' Whisper model
         """,
+    )
+
+    parser.add_argument(
+        "--quick",
+        "-q",
+        action="store_true",
+        help="Modo rápido: janela no canto inferior direito, grava ao abrir e salva .txt",
+    )
+
+    parser.add_argument(
+        "--daemon",
+        "-d",
+        action="store_true",
+        help="Fica em segundo plano e abre/grava com o atalho configurado",
+    )
+
+    parser.add_argument(
+        "--configure",
+        action="store_true",
+        help="Configurar atalho global e pasta de transcrições",
+    )
+
+    parser.add_argument(
+        "--show-config",
+        action="store_true",
+        help="Mostrar configuração atual do modo rápido",
+    )
+
+    parser.add_argument(
+        "--hotkey",
+        metavar="COMBO",
+        help="Atalho global (ex: ctrl+shift+l); salva na configuração",
+    )
+
+    parser.add_argument(
+        "--save-dir",
+        metavar="PATH",
+        help="Pasta para salvar transcrições .txt; salva na configuração",
+    )
+
+    parser.add_argument(
+        "--no-corner",
+        action="store_true",
+        help="Desativa posição no canto inferior direito (modo rápido)",
+    )
+
+    parser.add_argument(
+        "--no-auto-record",
+        action="store_true",
+        help="Não inicia gravação automaticamente ao abrir (modo rápido)",
+    )
+
+    parser.add_argument(
+        "--no-save",
+        action="store_true",
+        help="Não salvar transcrições em arquivo .txt",
     )
 
     parser.add_argument(
@@ -290,8 +440,78 @@ Examples:
 
     args = parser.parse_args()
 
+    settings = ListenSettings.load()
+    settings_changed = False
+
+    if args.hotkey:
+        try:
+            HotkeyBinding.parse(args.hotkey)
+        except ValueError as exc:
+            console.print(f"[red]Atalho inválido: {exc}[/red]")
+            sys.exit(1)
+        settings.hotkey = args.hotkey
+        settings_changed = True
+
+    if args.save_dir:
+        settings.save_directory = args.save_dir
+        settings_changed = True
+
+    if args.no_corner:
+        settings.corner_mode = False
+        settings_changed = True
+
+    if args.no_auto_record:
+        settings.auto_record = False
+        settings_changed = True
+
+    if args.no_save:
+        settings.save_transcriptions = False
+        settings_changed = True
+
+    if args.quick or args.daemon:
+        if not args.no_corner:
+            settings.corner_mode = True
+        if not args.no_auto_record:
+            settings.auto_record = True
+        if not args.no_save:
+            settings.save_transcriptions = True
+        settings_changed = True
+
+    if settings_changed and not args.configure:
+        path = settings.save()
+        console.print(
+            f"[dim]Configuração atualizada em {rich_escape(str(path))}[/dim]"
+        )
+
+    config_only = (
+        any(
+            (
+                args.hotkey,
+                args.save_dir,
+                args.no_corner,
+                args.no_auto_record,
+                args.no_save,
+            )
+        )
+        and not args.quick
+        and not args.daemon
+        and not args.cli
+        and not args.configure
+        and not args.show_config
+    )
+
+    if config_only:
+        _print_settings(settings)
+        return
+
+    quick_auto_copy = settings.auto_copy if not args.no_copy else False
+
     try:
-        if args.cli:
+        if args.configure:
+            _configure_settings_interactive()
+        elif args.show_config:
+            _print_settings(settings)
+        elif args.cli:
             # Terminal interface
             app = ListenApp(
                 model_size=args.model,
@@ -299,6 +519,41 @@ Examples:
                 auto_copy=not args.no_copy,
             )
             app.run()
+        elif args.quick or args.daemon:
+            if args.daemon:
+                save_dir = rich_escape(str(settings.resolved_save_directory()))
+                console.print(
+                    Panel(
+                        f"[bold]Listen em segundo plano[/bold]\n\n"
+                        f"Atalho: [cyan]{settings.hotkey}[/cyan]\n"
+                        f"Salvar em: [cyan]{save_dir}[/cyan]\n"
+                        f"Canto inferior direito: [cyan]{'sim' if settings.corner_mode else 'não'}[/cyan]\n\n"
+                        "[dim]Pressione o atalho para abrir e gravar. "
+                        "Pressione de novo para parar e transcrever.[/dim]",
+                        border_style="blue",
+                    )
+                )
+            try:
+                _run_quick_gui(
+                    model_size=args.model,
+                    settings=settings,
+                    daemon=args.daemon,
+                    auto_copy=quick_auto_copy,
+                )
+            except ImportError as e:
+                _missing = getattr(e, "name", "") or ""
+                _msg = str(e).lower()
+                if _missing in ("gi", "_gi", "cairo") or "gi" in _msg:
+                    console.print(
+                        "[red]GTK/PyGObject não encontrado (módulo 'gi'). A interface gráfica precisa dele.[/red]\n\n"
+                        "[bold]Ubuntu / Debian:[/bold] instale os pacotes do sistema e use um venv com site-packages do SO, ou o Python do sistema:\n"
+                        "  [cyan]sudo apt install python3-gi python3-gi-cairo gir1.2-gtk-4.0 gir1.2-adw-1 libgtk-4-1 libadwaita-1-0[/cyan]\n"
+                        "  [cyan]python3 -m venv --system-site-packages .venv[/cyan]   [dim]# depois: source .venv/bin/activate && pip install -e .[/dim]\n\n"
+                        "[bold]Sem instalar GTK:[/bold] use só o modo terminal:\n"
+                        "  [cyan]listen --cli[/cyan]"
+                    )
+                    sys.exit(1)
+                raise
         else:
             # GUI interface (default)
             try:
@@ -317,9 +572,12 @@ Examples:
                     )
                     sys.exit(1)
                 raise
+            settings = ListenSettings.load()
             run_gui(
                 model_size=args.model,
                 auto_copy=not args.no_copy,
+                save_transcriptions=settings.save_transcriptions,
+                save_directory=settings.resolved_save_directory(),
             )
     except Exception as e:
         console.print(f"[red]Error: {e}[/red]")
