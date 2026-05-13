@@ -22,6 +22,12 @@ export PYTHONNOUSERSITE=1
 # Set XDG directories for model caching (uses ~/.cache by default)
 export XDG_CACHE_HOME="${XDG_CACHE_HOME:-$HOME/.cache}"
 
+# Whisper/ctranslate2: avoid ASCII locale decoding UTF-8 transcript (UnicodeDecodeError 0xc3)
+export PYTHONUTF8="${PYTHONUTF8:-1}"
+export PYTHONIOENCODING="${PYTHONIOENCODING:-utf-8}"
+case "${LANG:-}" in ""|"C"|"POSIX") export LANG="C.UTF-8" ;; esac
+case "${LC_ALL:-}" in ""|"C"|"POSIX") export LC_ALL="C.UTF-8" ;; esac
+
 # Set GI_TYPELIB_PATH for GTK4/Adwaita (PyGObject)
 export GI_TYPELIB_PATH="${APPDIR}/usr/lib/girepository-1.0:${GI_TYPELIB_PATH}"
 

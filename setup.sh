@@ -32,12 +32,12 @@ UPDATE_MODE=false
 SYSTEM_INSTALL=false
 
 print_banner() {
-    echo -e "${BLUE}"
-    echo "╔═══════════════════════════════════════════╗"
-    echo "║           Listen Setup Script             ║"
-    echo "║     Voice-to-Text for Linux               ║"
-    echo "╚═══════════════════════════════════════════╝"
-    echo -e "${NC}"
+    echo -e "${BLUE}" >&2
+    echo "╔═══════════════════════════════════════════╗" >&2
+    echo "║           Listen Setup Script             ║" >&2
+    echo "║     Voice-to-Text for Linux               ║" >&2
+    echo "╚═══════════════════════════════════════════╝" >&2
+    echo -e "${NC}" >&2
 }
 
 print_help() {
@@ -59,19 +59,19 @@ print_help() {
 }
 
 log_info() {
-    echo -e "${BLUE}[INFO]${NC} $1"
+    echo -e "${BLUE}[INFO]${NC} $1" >&2
 }
 
 log_success() {
-    echo -e "${GREEN}[SUCCESS]${NC} $1"
+    echo -e "${GREEN}[SUCCESS]${NC} $1" >&2
 }
 
 log_warn() {
-    echo -e "${YELLOW}[WARN]${NC} $1"
+    echo -e "${YELLOW}[WARN]${NC} $1" >&2
 }
 
 log_error() {
-    echo -e "${RED}[ERROR]${NC} $1"
+    echo -e "${RED}[ERROR]${NC} $1" >&2
 }
 
 # Parse arguments
@@ -109,7 +109,20 @@ done
 # BUILD FUNCTIONS
 # ============================================================
 
+require_portaudio_headers() {
+    if [ -f /usr/include/portaudio.h ] || [ -f /usr/local/include/portaudio.h ]; then
+        return 0
+    fi
+    log_error "Cabeçalhos PortAudio não encontrados (portaudio.h). PyAudio precisa deles para compilar."
+    log_error "Ubuntu/Debian: sudo apt install portaudio19-dev build-essential python3-dev"
+    log_error "Fedora/RHEL: sudo dnf install portaudio-devel python3-devel gcc"
+    log_error "Arch: sudo pacman -S portaudio base-devel python"
+    exit 1
+}
+
 build_appimage() {
+    require_portaudio_headers
+
     log_info "Building Listen AppImage v${APP_VERSION}..."
     
     BUILD_DIR="${SCRIPT_DIR}/build"
@@ -126,7 +139,14 @@ build_appimage() {
     
     log_info "Step 2/7: Installing dependencies..."
     pip install --upgrade pip wheel > /dev/null
-    pip install "${SCRIPT_DIR}" > /dev/null
+    if ! pip install -q "${SCRIPT_DIR}"; then
+        log_error "pip install falhou. Instale portaudio19-dev (ou equivalente), apague build/ e rode ./setup.sh de novo."
+        exit 1
+    fi
+    if ! python3 -c "import pyaudio" 2>/dev/null; then
+        log_error "PyAudio não está disponível no venv (import falhou). Instale portaudio19-dev, apague build/ e rode ./setup.sh de novo."
+        exit 1
+    fi
     
     log_info "Step 3/7: Bundling Python and packages..."
     PYTHON_VERSION=$(python3 -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')")
@@ -214,11 +234,43 @@ build_appimage() {
 # ============================================================
 
 find_appimage() {
-    if [ -f "${SCRIPT_DIR}/${APP_NAME}"*.AppImage ]; then
-        ls "${SCRIPT_DIR}/${APP_NAME}"*.AppImage | head -1
+    local -a matches
+    shopt -s nullglob
+    matches=("${SCRIPT_DIR}/${APP_NAME}"*.AppImage)
+    shopt -u nullglob
+    if [ "${#matches[@]}" -gt 0 ]; then
+        printf '%s\n' "${matches[0]}"
     else
-        echo ""
+        printf '\n'
     fi
+}
+
+# Install over a running binary: "cp" to the same path fails with ETXTBSY ("text file busy").
+# Copy to a temp file, then "mv" into place (running process keeps the old inode).
+install_executable_replace() {
+    local src="$1"
+    local dest="$2"
+    local tmp
+
+    if command -v mktemp &> /dev/null; then
+        tmp="$(mktemp "${dest}.tmp.XXXXXX")" || return 1
+    else
+        tmp="${dest}.tmp.$$"
+    fi
+
+    if ! cp "${src}" "${tmp}"; then
+        rm -f "${tmp}"
+        return 1
+    fi
+    chmod +x "${tmp}" || {
+        rm -f "${tmp}"
+        return 1
+    }
+    if ! mv -f "${tmp}" "${dest}"; then
+        rm -f "${tmp}"
+        return 1
+    fi
+    return 0
 }
 
 install_user() {
@@ -237,8 +289,10 @@ install_user() {
     mkdir -p "${ICONS_DIR}/64x64/apps"
     mkdir -p "${ICONS_DIR}/48x48/apps"
     
-    cp "${APPIMAGE_PATH}" "${INSTALL_DIR}/${APP_NAME}"
-    chmod +x "${INSTALL_DIR}/${APP_NAME}"
+    if ! install_executable_replace "${APPIMAGE_PATH}" "${INSTALL_DIR}/${APP_NAME}"; then
+        log_error "Falha ao instalar em ${INSTALL_DIR}/${APP_NAME} (feche o Listen se estiver aberto e tente de novo)."
+        exit 1
+    fi
     
     # Install icons
     ICON_SOURCE="${SCRIPT_DIR}/appimage/listen.png"
@@ -293,8 +347,25 @@ install_system() {
     
     log_info "Installing system-wide (requires sudo)..."
     
-    sudo cp "${APPIMAGE_PATH}" "/usr/local/bin/${APP_NAME}"
-    sudo chmod +x "/usr/local/bin/${APP_NAME}"
+    local tmp
+    tmp="$(mktemp)" || {
+        log_error "mktemp falhou"
+        exit 1
+    }
+    if ! sudo cp "${APPIMAGE_PATH}" "${tmp}"; then
+        rm -f "${tmp}"
+        log_error "Falha ao copiar AppImage para temporário."
+        exit 1
+    fi
+    if ! sudo chmod +x "${tmp}"; then
+        sudo rm -f "${tmp}"
+        exit 1
+    fi
+    if ! sudo mv -f "${tmp}" "/usr/local/bin/${APP_NAME}"; then
+        sudo rm -f "${tmp}"
+        log_error "Falha ao instalar em /usr/local/bin/${APP_NAME}."
+        exit 1
+    fi
     
     log_success "Installed to /usr/local/bin/${APP_NAME}"
 }

@@ -1,5 +1,9 @@
 """Listen - Voice-to-text transcription tool for Linux."""
 
+from .runtime_env import ensure_utf8_runtime
+
+ensure_utf8_runtime()
+
 __version__ = "1.0.0"
 
 from .recorder import AudioRecorder

@@ -166,16 +166,22 @@ class Transcriber:
             vad_filter=True,  # Filter out silence
         )
 
-        # Collect all text segments
-        text_parts = []
+        def _as_text(val: object) -> str:
+            if isinstance(val, bytes):
+                return val.decode("utf-8", errors="replace")
+            return str(val).strip()
+
+        text_parts: list[str] = []
         for segment in segments:
-            text_parts.append(segment.text.strip())
+            text_parts.append(_as_text(segment.text))
 
         full_text = " ".join(text_parts)
+        lang_raw = info.language
+        language = _as_text(lang_raw) if lang_raw is not None else ""
 
         return TranscriptionResult(
             text=full_text,
-            language=info.language,
+            language=language,
             language_probability=info.language_probability,
             duration=info.duration,
         )
@@ -202,7 +208,8 @@ class Transcriber:
                         "--format=csv,noheader,nounits",
                     ],
                     capture_output=True,
-                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
                     timeout=5,
                 )
                 if result.returncode == 0:
@@ -216,7 +223,8 @@ class Transcriber:
                 result = subprocess.run(
                     ["nvidia-smi"],
                     capture_output=True,
-                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
                     timeout=5,
                 )
                 if result.returncode == 0:

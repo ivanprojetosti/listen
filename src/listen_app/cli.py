@@ -13,17 +13,22 @@ Controls:
 """
 
 import argparse
+import os
 import sys
 import threading
 from typing import Optional
 
-import pyperclip
+from .runtime_env import ensure_utf8_runtime
+
+ensure_utf8_runtime()
+
 from pynput import keyboard
 from rich.console import Console
 from rich.panel import Panel
 from rich.live import Live
 from rich.text import Text
 
+from .clipboard_copy import copy_plain_text
 from .recorder import AudioRecorder
 from .transcriber import Transcriber, ModelSize
 
@@ -150,7 +155,7 @@ class ListenApp:
                     self._last_language = result.language
 
                     if self.auto_copy and result.text:
-                        pyperclip.copy(result.text)
+                        copy_plain_text(result.text)
 
                 except Exception as e:
                     console.print(f"[red]Error: {e}[/red]")
@@ -296,8 +301,22 @@ Examples:
             app.run()
         else:
             # GUI interface (default)
-            from .gui import run_gui
-
+            try:
+                from .gui import run_gui
+            except ImportError as e:
+                _missing = getattr(e, "name", "") or ""
+                _msg = str(e).lower()
+                if _missing in ("gi", "_gi", "cairo") or "gi" in _msg:
+                    console.print(
+                        "[red]GTK/PyGObject não encontrado (módulo 'gi'). A interface gráfica precisa dele.[/red]\n\n"
+                        "[bold]Ubuntu / Debian:[/bold] instale os pacotes do sistema e use um venv com site-packages do SO, ou o Python do sistema:\n"
+                        "  [cyan]sudo apt install python3-gi python3-gi-cairo gir1.2-gtk-4.0 gir1.2-adw-1 libgtk-4-1 libadwaita-1-0[/cyan]\n"
+                        "  [cyan]python3 -m venv --system-site-packages .venv[/cyan]   [dim]# depois: source .venv/bin/activate && pip install -e .[/dim]\n\n"
+                        "[bold]Sem instalar GTK:[/bold] use só o modo terminal:\n"
+                        "  [cyan]listen --cli[/cyan]"
+                    )
+                    sys.exit(1)
+                raise
             run_gui(
                 model_size=args.model,
                 auto_copy=not args.no_copy,

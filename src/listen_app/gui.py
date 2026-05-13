@@ -1,8 +1,12 @@
 """GTK4 GUI for Listen voice-to-text application."""
 
-import threading
 import struct
+import threading
 from typing import Optional
+
+from .runtime_env import ensure_utf8_runtime
+
+ensure_utf8_runtime()
 
 import gi
 
@@ -10,8 +14,7 @@ gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
 from gi.repository import Gtk, Adw, GLib, Gdk
 
-import pyperclip
-
+from .clipboard_copy import copy_plain_text
 from .recorder import AudioRecorder
 from .transcriber import Transcriber, ModelSize
 
@@ -114,6 +117,11 @@ class ListenGUI(Adw.Application):
         self._state = self.STATE_READY
         self._last_transcription = ""
         self._last_language = ""
+
+        # Transcription result must reach the GTK thread without passing str through
+        # GLib.idle_add(..., user_data): GObject marshalling can use ASCII and break PT/AR text.
+        self._transcription_delivery_lock = threading.Lock()
+        self._pending_transcription: Optional[tuple[str, str]] = None
 
         self.connect("activate", self._on_activate)
 
@@ -218,6 +226,36 @@ class ListenGUI(Adw.Application):
 
         self.window.present()
 
+    def _clipboard_set_text(self, text: str) -> None:
+        """Copy UTF-8 text to the clipboard (main thread only)."""
+        display = Gdk.Display.get_default()
+        if display is None:
+            copy_plain_text(text)
+            return
+        try:
+            clipboard = display.get_clipboard()
+            gbytes = GLib.Bytes.new(text.encode("utf-8"))
+            provider = Gdk.ContentProvider.new_for_bytes(
+                "text/plain;charset=utf-8", gbytes
+            )
+            clipboard.set_content(provider)
+        except Exception:
+            copy_plain_text(text)
+
+    def _schedule_transcription_ui(self, text: str, language: str = "") -> None:
+        """Queue (text, language) for the main thread; avoids GObject UTF-8/ASCII bugs."""
+        with self._transcription_delivery_lock:
+            self._pending_transcription = (text, language)
+        GLib.idle_add(self._deliver_pending_transcription)
+
+    def _deliver_pending_transcription(self, *_args) -> bool:
+        with self._transcription_delivery_lock:
+            pending = self._pending_transcription
+            self._pending_transcription = None
+        if pending is not None:
+            self._on_transcription_complete(pending[0], pending[1])
+        return False
+
     def _apply_css(self):
         """Apply custom styling."""
         css = b"""
@@ -257,20 +295,27 @@ class ListenGUI(Adw.Application):
 
             # Format device info for display
             device_text = self._format_device_info(info)
-            GLib.idle_add(self._update_device_info, device_text, info["device"])
+            # Do not pass non-ASCII str as GLib.idle_add user_data (GObject marshals as ASCII on some setups).
+            GLib.idle_add(
+                lambda t=device_text, dev=info["device"]: self._update_device_info(t, dev)
+                or False
+            )
 
             GLib.idle_add(
-                self._update_status,
-                f"Ready • {info['model_size'].upper()} model",
+                lambda m=f"Ready • {info['model_size'].upper()} model": self._update_status(
+                    m
+                )
+                or False
             )
             GLib.idle_add(self.action_button.set_sensitive, True)
             GLib.idle_add(self.model_dropdown.set_sensitive, True)
         except Exception as e:
-            GLib.idle_add(self._update_status, f"Error: {e}")
+            GLib.idle_add(lambda err=e: self._update_status(f"Error: {err}") or False)
             GLib.idle_add(
-                self._update_device_info,
-                "<span color='#e53935'>⚠ Error loading model</span>",
-                "error",
+                lambda: self._update_device_info(
+                    "<span color='#e53935'>⚠ Error loading model</span>", "error"
+                )
+                or False
             )
             GLib.idle_add(self.action_button.set_sensitive, True)
             GLib.idle_add(self.model_dropdown.set_sensitive, True)
@@ -369,7 +414,7 @@ class ListenGUI(Adw.Application):
 
     def _on_audio_chunk(self, data: bytes):
         """Handle incoming audio chunk for waveform."""
-        GLib.idle_add(self.waveform.add_samples, data)
+        GLib.idle_add(lambda d=data: self.waveform.add_samples(d) or False)
 
     def _stop_and_transcribe(self):
         """Stop recording and transcribe."""
@@ -388,23 +433,27 @@ class ListenGUI(Adw.Application):
         audio_data = self._recorder.stop()
 
         if len(audio_data) < 1000:
-            GLib.idle_add(self._on_transcription_complete, "(no audio captured)")
+            self._schedule_transcription_ui("(no audio captured)", "")
             return
 
         try:
             result = self._transcriber.transcribe(audio_data)
             text = result.text.strip()
-            language = result.language
-
-            if self.auto_copy and text:
-                pyperclip.copy(text)
-
-            GLib.idle_add(self._on_transcription_complete, text, language)
+            language = result.language or ""
+            self._schedule_transcription_ui(text, language)
         except Exception as e:
-            GLib.idle_add(self._on_transcription_complete, f"Error: {e}", "")
+            self._schedule_transcription_ui(f"Error: {e}", "")
 
     def _on_transcription_complete(self, text: str, language: str = ""):
         """Handle transcription completion (runs on main thread)."""
+        if (
+            self.auto_copy
+            and text
+            and not text.startswith("Error:")
+            and not text.startswith("(")
+        ):
+            self._clipboard_set_text(text)
+
         self._last_transcription = text
         self._last_language = language
         self._state = self.STATE_RESULT
@@ -425,6 +474,7 @@ class ListenGUI(Adw.Application):
             "ja": "Japanese",
             "ko": "Korean",
             "ru": "Russian",
+            "pt": "Portuguese",
         }
         lang_display = lang_names.get(language, language.upper() if language else "")
 
@@ -443,7 +493,7 @@ class ListenGUI(Adw.Application):
         if self._last_transcription and not self._last_transcription.startswith(
             "Error:"
         ):
-            pyperclip.copy(self._last_transcription)
+            self._clipboard_set_text(self._last_transcription)
 
         self._state = self.STATE_READY
         self._last_transcription = ""
