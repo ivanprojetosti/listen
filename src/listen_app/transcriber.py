@@ -139,31 +139,24 @@ class Transcriber:
         else:
             return "base"  # Low VRAM fallback
 
-    def transcribe(
-        self, audio_source: str | bytes, language: Optional[str] = None
+    def _run_transcribe(
+        self,
+        audio_source: str | io.BytesIO,
+        language: Optional[str],
+        *,
+        vad_filter: bool,
     ) -> TranscriptionResult:
-        """
-        Transcribe audio to text with Arabic-optimized settings.
+        if isinstance(audio_source, io.BytesIO):
+            audio_source.seek(0)
 
-        Args:
-            audio_source: Either a file path (str) or WAV audio data (bytes)
-            language: Optional language code (e.g., 'en', 'ar'). If None, auto-detects.
-
-        Returns:
-            TranscriptionResult with transcribed text and metadata
-        """
-        # Handle bytes input by writing to a temporary buffer
-        if isinstance(audio_source, bytes):
-            audio_source = io.BytesIO(audio_source)
-
-        # Transcribe with Arabic-optimized settings
         segments, info = self._model.transcribe(
             audio_source,
             language=language,
-            beam_size=8,  # Increased for better accuracy on complex languages
-            patience=1.5,  # More thorough search
-            condition_on_previous_text=False,  # Prevents hallucination in Arabic
-            vad_filter=True,  # Filter out silence
+            beam_size=8,
+            patience=1.5,
+            condition_on_previous_text=False,
+            vad_filter=vad_filter,
+            vad_parameters={"min_speech_duration_ms": 150, "threshold": 0.35},
         )
 
         def _as_text(val: object) -> str:
@@ -177,14 +170,38 @@ class Transcriber:
 
         full_text = " ".join(text_parts)
         lang_raw = info.language
-        language = _as_text(lang_raw) if lang_raw is not None else ""
+        detected_language = _as_text(lang_raw) if lang_raw is not None else ""
 
         return TranscriptionResult(
             text=full_text,
-            language=language,
+            language=detected_language,
             language_probability=info.language_probability,
             duration=info.duration,
         )
+
+    def transcribe(
+        self, audio_source: str | bytes, language: Optional[str] = None
+    ) -> TranscriptionResult:
+        """
+        Transcribe audio to text with Arabic-optimized settings.
+
+        Args:
+            audio_source: Either a file path (str) or WAV audio data (bytes)
+            language: Optional language code (e.g., 'en', 'ar'). If None, auto-detects.
+
+        Returns:
+            TranscriptionResult with transcribed text and metadata
+        """
+        audio_buffer: str | io.BytesIO
+        if isinstance(audio_source, bytes):
+            audio_buffer = io.BytesIO(audio_source)
+        else:
+            audio_buffer = audio_source
+
+        result = self._run_transcribe(audio_buffer, language, vad_filter=True)
+        if not result.text.strip() and result.duration >= 0.5:
+            result = self._run_transcribe(audio_buffer, language, vad_filter=False)
+        return result
 
     def get_model_info(self) -> dict:
         """Get detailed information about the loaded model and device."""

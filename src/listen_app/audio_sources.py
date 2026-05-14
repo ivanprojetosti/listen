@@ -27,3 +27,15 @@ def get_default_monitor_source() -> str | None:
 def is_meeting_capture_available() -> bool:
     """Check whether system-audio loopback capture is likely available."""
     return get_default_monitor_source() is not None
+
+
+def ensure_default_input_ready() -> None:
+    """Wake the default PulseAudio/PipeWire input (often suspended until used)."""
+    for args in (
+        ["pactl", "suspend-source", "@DEFAULT_SOURCE@", "0"],
+        ["pactl", "set-source-mute", "@DEFAULT_SOURCE@", "0"],
+    ):
+        try:
+            subprocess.run(args, capture_output=True, timeout=2, check=False)
+        except (OSError, subprocess.SubprocessError):
+            pass

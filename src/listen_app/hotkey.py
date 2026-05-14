@@ -77,7 +77,12 @@ class HotkeyBinding:
             if len(part) == 1:
                 if main_key is not None:
                     raise ValueError(f"Tecla duplicada no atalho: {hotkey}")
-                main_key = keyboard.KeyCode.from_char(part)
+                vk = _resolve_vk_for_char(part)
+                main_key = (
+                    keyboard.KeyCode.from_char(part, vk=vk)
+                    if vk is not None
+                    else keyboard.KeyCode.from_char(part)
+                )
                 continue
             raise ValueError(f"Tecla desconhecida no atalho: {part}")
 
@@ -108,6 +113,45 @@ class HotkeyBinding:
                     break
 
         return "+".join(names)
+
+
+def _resolve_vk_for_char(char: str) -> int | None:
+    """Map a character to the platform virtual key / keysym when possible."""
+    try:
+        from pynput.keyboard._xorg import SYMBOLS
+
+        lower = char.lower()
+        fallback: int | None = None
+        for _name, (vk, sym_char) in SYMBOLS.items():
+            if not sym_char:
+                continue
+            if sym_char == char:
+                return vk
+            if sym_char.lower() == lower and fallback is None:
+                fallback = vk
+        return fallback
+    except ImportError:
+        pass
+    return None
+
+
+def _key_codes_match(
+    expected: keyboard.KeyCode,
+    actual: keyboard.KeyCode,
+) -> bool:
+    if expected == actual:
+        return True
+    if expected.char and actual.char:
+        return expected.char.lower() == actual.char.lower()
+    if expected.vk is not None and actual.vk is not None:
+        return expected.vk == actual.vk
+    if expected.char and actual.vk is not None:
+        expected_vk = expected.vk or _resolve_vk_for_char(expected.char)
+        return expected_vk is not None and expected_vk == actual.vk
+    if actual.char and expected.vk is not None:
+        actual_vk = actual.vk or _resolve_vk_for_char(actual.char)
+        return actual_vk is not None and expected.vk == actual_vk
+    return False
 
 
 def _normalize_key(key: keyboard.Key | keyboard.KeyCode | None) -> keyboard.Key | str | None:
@@ -152,9 +196,14 @@ class GlobalHotkeyListener:
         return self._pressed_modifiers == set(self._binding.modifiers)
 
     def _main_key_matches(self, key: keyboard.Key | keyboard.KeyCode | None) -> bool:
-        expected = _normalize_key(self._binding.key)
-        current = _normalize_key(key)
-        return expected == current
+        expected = self._binding.key
+        if key is None or expected is None:
+            return False
+        if expected == key:
+            return True
+        if isinstance(expected, keyboard.KeyCode) and isinstance(key, keyboard.KeyCode):
+            return _key_codes_match(expected, key)
+        return _normalize_key(expected) == _normalize_key(key)
 
     def _track_modifier_press(self, key: keyboard.Key | keyboard.KeyCode) -> None:
         if key in MODIFIER_ALIASES.values():

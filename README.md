@@ -5,8 +5,8 @@
 <h1 align="center">Listen</h1>
 
 <p align="center">
-  <strong>Voice-to-Text for Linux</strong><br>
-  Fast, private, offline transcription powered by Whisper AI
+  <strong>Transcrição de voz para texto no Linux</strong><br>
+  Rápido, privado e offline — powered by Whisper AI
 </p>
 
 <p align="center">
@@ -17,74 +17,122 @@
 
 ---
 
-## ✨ Features
+## O que é
 
-| Feature | Description |
-|---------|-------------|
-| 🖥️ **Modern GUI** | GTK4/libadwaita interface with real-time waveform visualization |
-| 🎤 **Flexible Recording** | Push-to-talk or toggle mode |
-| 🧠 **Local AI** | Uses faster-whisper — no internet required |
-| 📋 **Clipboard Integration** | Transcribed text is auto-copied |
-| 🎯 **Smart Model Selection** | Auto-selects optimal model based on GPU memory |
-| 🌍 **Multilingual Support** | Enhanced Arabic support with language detection |
-| 📦 **Portable** | Single AppImage runs on any Linux distro |
+O **Listen** grava áudio do microfone (ou microfone + sistema no modo reunião), transcreve localmente com [faster-whisper](https://github.com/SYSTRAN/faster-whisper) e pode copiar o texto para a área de transferência e salvar em `.txt`.
+
+Funciona **sem internet** após o primeiro download do modelo de IA.
 
 ---
 
-## 🤖 Smart Model Selection
+## Início rápido (desenvolvimento / código-fonte)
 
-Listen automatically selects the optimal Whisper model based on your hardware:
+Use este fluxo se você clonou o repositório e quer rodar a partir do código.
 
-| GPU Memory | Model | Best For |
-|------------|-------|----------|
-| 4GB+ VRAM | `medium` | Best accuracy for Arabic & multilingual |
-| 2GB+ VRAM | `small` | Good balance of speed & accuracy |
-| <2GB VRAM | `base` | Lightweight GPU processing |
-| CPU only | `tiny` | Fast CPU inference |
-
-**Arabic Optimizations:**
-
-- Increased beam search for complex scripts
-- Hallucination prevention for Arabic text
-- Automatic language detection (shows "Arabic detected" after transcription)
-
----
-
-## 🚀 Quick Start
-
-**Ubuntu/Debian PPA (Stable):**
+### 1. Dependências do sistema (Ubuntu / Debian / Pop!_OS)
 
 ```bash
-sudo add-apt-repository ppa:abubakrkhaled1/listen
 sudo apt update
-sudo apt install listen
+sudo apt install -y \
+  python3 python3-venv python3-pip \
+  libportaudio2 portaudio19-dev \
+  python3-gi python3-gi-cairo \
+  gir1.2-gtk-4.0 gir1.2-adw-1 \
+  libgtk-4-1 libadwaita-1-0
 ```
 
-**One-command install (AppImage):**
+### 2. Criar ambiente virtual e instalar
 
 ```bash
-git clone https://github.com/abubakerKhaled/listen.git && cd listen && ./setup.sh
+cd listen
+rm -rf .venv
+python3 -m venv --system-site-packages .venv
+source .venv/bin/activate
+
+pip install --upgrade pip wheel packaging hatchling
+pip install -e .
 ```
 
-Or install globally (requires sudo):
+> O `--system-site-packages` é necessário para o GTK (`gi`) funcionar com a interface gráfica.
+
+### 3. Configurar atalho e pasta de salvamento
 
 ```bash
-sudo wget -qO /usr/local/bin/listen https://github.com/abubakerKhaled/listen/releases/download/v1.0.0/listen-1.0.0-x86_64.AppImage && sudo chmod +x /usr/local/bin/listen
+listen --configure
 ```
 
-Run it:
+Você define:
+
+- **Atalho global** (ex.: `ctrl+shift+l`, `ctrl+alt+space`)
+- **Pasta** onde os `.txt` serão salvos
+- Se a janela abre no **canto inferior direito**
+
+A config fica em `~/.config/listen/config.json`.
+
+### 4. Iniciar em segundo plano (recomendado)
 
 ```bash
-listen
+listen --daemon
 ```
 
-> **Note:** First run downloads the AI model (~40-150MB). Subsequent runs are instant.
+Deixe esse terminal aberto. O Listen fica em segundo plano e responde ao atalho.
+
+### 5. Usar o atalho (dois passos)
+
+| Passo | Ação |
+|-------|------|
+| **1º** atalho | Abre a janela e **começa a gravar** |
+| **2º** atalho | **Para**, transcreve e **salva** o `.txt` |
+
+Exemplo com atalho `ctrl+shift+l`:
+
+1. Pressione `Ctrl+Shift+L` e fale por alguns segundos
+2. Pressione `Ctrl+Shift+L` de novo
+3. O texto aparece na janela e é salvo em `~/.local/share/listen/transcriptions/` (ou na pasta que você configurou)
+
+### 6. Verificar configuração
+
+```bash
+listen --show-config
+```
 
 ---
 
-## 📦 Installation
+## Modos de execução
 
-### Unified Setup Script (Recommended)
+| Comando | O que faz |
+|---------|-----------|
+| `listen` | Interface gráfica normal (janela central) |
+| `listen --daemon` | Segundo plano + atalho global + salvar `.txt` |
+| `listen --quick` | Janela no canto, grava ao abrir, salva `.txt` |
+| `listen --configure` | Assistente de configuração |
+| `listen --show-config` | Mostra a config atual |
+| `listen --cli` | Modo terminal (sem GUI) |
+
+### Opções úteis
+
+| Opção | Descrição |
+|-------|-----------|
+| `--model, -m` | Modelo: `tiny`, `base`, `small`, `medium`, `large-v3` |
+| `--hotkey` | Define atalho e salva na config |
+| `--save-dir` | Define pasta de salvamento |
+| `--no-copy` | Não copia automaticamente para a área de transferência |
+| `--no-save` | Não salva arquivos `.txt` |
+
+### Exemplos
+
+```bash
+listen --daemon
+listen --configure
+listen --model small --daemon
+listen --cli --toggle
+```
+
+---
+
+## Instalação para usuário final (AppImage)
+
+Se você **não** vai desenvolver, pode instalar o binário pronto:
 
 ```bash
 git clone https://github.com/abubakerKhaled/listen.git
@@ -92,199 +140,134 @@ cd listen
 ./setup.sh
 ```
 
-| Option | Description |
-|--------|-------------|
-| `./setup.sh` | Build (if needed) and install with desktop integration |
-| `./setup.sh --system` | System-wide install to `/usr/local/bin` (requires sudo) |
-| `./setup.sh --build-only` | Only build the AppImage |
-| `./setup.sh --install-only` | Install existing AppImage |
-| `./setup.sh --update` | Check for and install updates |
-
-<details>
-<summary><strong>Manual installation</strong></summary>
+Ou via PPA (Ubuntu/Debian):
 
 ```bash
-# Download
-wget https://github.com/abubakerKhaled/listen/releases/download/v1.0.0/listen-1.0.0-x86_64.AppImage
-
-# Install globally
-sudo mv listen-1.0.0-x86_64.AppImage /usr/local/bin/listen
-sudo chmod +x /usr/local/bin/listen
+sudo add-apt-repository ppa:abubakrkhaled1/listen
+sudo apt update
+sudo apt install listen
 ```
 
-</details>
-
-<details>
-<summary><strong>User-only (no sudo)</strong></summary>
-
-```bash
-mkdir -p ~/.local/bin
-wget -qO ~/.local/bin/listen https://github.com/abubakerKhaled/listen/releases/download/v1.0.0/listen-1.0.0-x86_64.AppImage
-chmod +x ~/.local/bin/listen
-
-# Add to PATH (if not already)
-echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc
-source ~/.bashrc
-```
-
-</details>
-
-<details>
-<summary><strong>Native Packages (.deb/.rpm)</strong></summary>
-
-**Debian/Ubuntu (.deb):**
-
-```bash
-# Download and install
-wget https://github.com/abubakerKhaled/listen/releases/download/v1.0.0/listen_1.0.0-1_amd64.deb
-sudo apt install ./listen_1.0.0-1_amd64.deb
-```
-
-**Fedora/RHEL (.rpm):**
-
-```bash
-# Download and install
-wget https://github.com/abubakerKhaled/listen/releases/download/v1.0.0/listen-1.0.0-1.x86_64.rpm
-sudo dnf install ./listen-1.0.0-1.x86_64.rpm
-```
-
-**Build from source:**
-
-```bash
-git clone https://github.com/abubakerKhaled/listen.git
-cd listen
-./build-packages.sh --deb-only  # For .deb
-./build-packages.sh --rpm-only  # For .rpm
-```
-
-</details>
+Na primeira execução o modelo de IA é baixado (~40–150 MB). Depois disso fica instantâneo.
 
 ---
 
-## 🔄 Updating
+## Configuração (`~/.config/listen/config.json`)
 
-Check for and install updates:
+Exemplo:
 
-```bash
-./setup.sh --update
+```json
+{
+  "hotkey": "ctrl+shift+l",
+  "save_directory": "/home/SEU_USUARIO/.local/share/listen/transcriptions",
+  "corner_mode": true,
+  "auto_record": true,
+  "auto_copy": true,
+  "save_transcriptions": true,
+  "meeting_mode": false,
+  "language": "pt"
+}
 ```
 
-Or if you installed from the repo, pull and reinstall:
-
-```bash
-cd listen && git pull && ./setup.sh
-```
+| Campo | Descrição |
+|-------|-----------|
+| `hotkey` | Atalho global (modo `--daemon`) |
+| `save_directory` | Pasta dos arquivos `.txt` |
+| `corner_mode` | Janela no canto inferior direito |
+| `meeting_mode` | Grava microfone **e** áudio do sistema |
+| `language` | Idioma forçado na transcrição (`pt`, `en`, etc.) ou omita para detecção automática |
 
 ---
 
-## 📖 Usage
+## Recursos
 
-### GUI Mode (Default)
+| Recurso | Descrição |
+|---------|-----------|
+| Interface GTK4 | Visualização de forma de onda em tempo real |
+| Gravação flexível | Botão na GUI ou atalho global |
+| IA local | faster-whisper, sem enviar áudio para a nuvem |
+| Área de transferência | Texto copiado automaticamente após transcrever |
+| Modelo automático | Escolhe modelo conforme GPU/CPU |
+| Multilíngue | Detecção de idioma; suporte reforçado a árabe |
 
-```bash
-listen
-```
+### Seleção automática de modelo
 
-The GUI provides real-time waveform visualization, one-click recording, and automatic clipboard copy.
-
-### CLI Mode
-
-```bash
-listen --cli              # Push-to-talk (hold Ctrl+Space)
-listen --cli --toggle     # Toggle mode (press to start/stop)
-```
-
-### Options
-
-| Option | Description |
-|--------|-------------|
-| `--cli, -c` | Use terminal interface |
-| `--toggle, -t` | Toggle recording mode (CLI only) |
-| `--model, -m` | Choose model: `tiny`, `base`, `small`, `medium`, `large-v3` |
-| `--no-copy` | Disable auto-copy to clipboard |
-
-### Examples
-
-```bash
-listen --model small              # GUI with small model
-listen --cli --toggle --no-copy   # CLI toggle without clipboard
-```
+| Hardware | Modelo padrão |
+|----------|---------------|
+| GPU 4 GB+ VRAM | `medium` |
+| GPU 2 GB+ VRAM | `small` |
+| GPU &lt; 2 GB VRAM | `base` |
+| Só CPU | `tiny` |
 
 ---
 
-## 🔧 Building from Source
-
-### Prerequisites
+## Build AppImage (opcional)
 
 ```bash
-# Ubuntu/Debian
 sudo apt install libportaudio2 portaudio19-dev python3-venv \
                  libgtk-4-1 libadwaita-1-0 gir1.2-gtk-4.0 gir1.2-adw-1
-```
-
-### Build
-
-```bash
-git clone https://github.com/abubakerKhaled/listen.git
-cd listen
 ./build-appimage.sh
 ```
 
-Creates `listen-1.0.0-x86_64.AppImage` in the project directory.
+Gera `listen-1.0.0-x86_64.AppImage` na pasta do projeto.
 
 ---
 
-## ❓ Troubleshooting
+## Solução de problemas
 
-| Issue | Solution |
-|-------|----------|
-| First run is slow | Model downloads on first use. Subsequent runs are instant. |
-| "No audio captured" | Check mic with `arecord -l`. Ensure PulseAudio/PipeWire is running. |
-| Slow on CPU | Use `listen --model tiny` |
-| Keyboard shortcut not working | On Wayland, run from terminal with proper permissions |
+| Problema | O que fazer |
+|----------|-------------|
+| Atalho não funciona | Use `listen --daemon` (não basta `listen --configure`) |
+| Grava mas não salva | Pressione o atalho **duas vezes** (iniciar → parar) |
+| `pip install -e .` falha | Rode `pip install --upgrade pip packaging hatchling` antes |
+| Erro de Unicode / `0xc3` | O Listen já força UTF-8 ao iniciar; reinicie o processo após atualizar |
+| "Nenhum áudio capturado" | Verifique o microfone: `pactl get-default-source` e `arecord -l` |
+| Microfone suspenso | O Listen tenta ativar a entrada padrão antes de gravar |
+| Transcrição vazia | Fale mais tempo, mais perto do mic; teste com `"language": "pt"` na config |
+| Modo reunião estranho | Desative `meeting_mode` se só quiser o microfone |
+| Primeira execução lenta | Download do modelo na primeira vez — normal |
+| CPU lenta | `listen --model tiny --daemon` |
+| Atalho no Wayland | Pode exigir permissões extras; no X11 costuma funcionar direto |
+
+### Reset completo do ambiente de desenvolvimento
+
+```bash
+cd listen
+pkill -f 'listen --daemon' 2>/dev/null || true
+rm -rf .venv
+python3 -m venv --system-site-packages .venv
+source .venv/bin/activate
+pip install --upgrade pip wheel packaging hatchling
+pip install -e .
+listen --configure
+listen --daemon
+```
 
 ---
 
-## 🗑️ Uninstall
-
-<details>
-<summary><strong>Using uninstall script</strong></summary>
+## Desinstalar
 
 ```bash
 ./uninstall.sh
 ```
 
-</details>
-
-<details>
-<summary><strong>Manual uninstall</strong></summary>
+Ou manualmente:
 
 ```bash
-# Global install
-sudo rm /usr/local/bin/listen
-
-# User install
 rm ~/.local/bin/listen
 rm ~/.local/share/applications/listen.desktop
 rm -f ~/.local/share/icons/hicolor/*/apps/listen.png
+sudo rm -f /usr/local/bin/listen
 ```
 
-</details>
+---
+
+## Contribuindo
+
+Pull requests são bem-vindos. Veja também `docs/contributing.md`.
 
 ---
 
-## 🤝 Contributing
+## Licença
 
-Contributions are welcome! Please feel free to submit a Pull Request.
-
----
-
-## 📄 License
-
-[Apache License 2.0](LICENSE) — free to use, modify, and distribute.
-
----
-
-<p align="center">
-  Made with ❤️ for the Linux community
-</p>
+[Apache License 2.0](LICENSE)

@@ -27,6 +27,7 @@ class ListenSettings:
     auto_copy: bool = True
     save_transcriptions: bool = True
     meeting_mode: bool = False
+    language: str | None = None
 
     @classmethod
     def load(cls, path: Path | None = None) -> "ListenSettings":

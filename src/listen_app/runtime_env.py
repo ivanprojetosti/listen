@@ -2,28 +2,36 @@
 
 from __future__ import annotations
 
+import locale
 import os
 
-
-def _env_has_utf8(name: str) -> bool:
-    v = (os.environ.get(name) or "").lower()
-    return "utf-8" in v or "utf8" in v
+_APPLIED = False
 
 
 def ensure_utf8_runtime() -> None:
     """
-    Deve ser chamado no início do processo (antes de inferência).
-    Com LANG/LC_ALL=C, várias libs decodificam texto como ASCII e quebram em PT/AR/etc.
-    """
-    os.environ.setdefault("PYTHONUTF8", "1")
-    os.environ.setdefault("PYTHONIOENCODING", "utf-8")
+    Equivalente a:
+      LANG=C.UTF-8 LC_ALL=C.UTF-8 PYTHONUTF8=1 listen ...
 
-    if _env_has_utf8("LC_ALL") or _env_has_utf8("LANG"):
+    Deve rodar no início do processo, antes de carregar faster-whisper/GTK.
+    Com LC_ALL=C (sem .UTF-8), libs C/Python decodificam texto como ASCII e quebram em PT/AR.
+    """
+    global _APPLIED
+    if _APPLIED:
+        return
+    _APPLIED = True
+
+    if os.environ.get("LISTEN_PRESERVE_LOCALE") == "1":
         return
 
-    lc = (os.environ.get("LC_ALL") or "").strip().upper()
-    lang = (os.environ.get("LANG") or "").strip().upper()
-    if lc in ("", "C", "POSIX"):
-        os.environ["LC_ALL"] = "C.UTF-8"
-    if lang in ("", "C", "POSIX"):
-        os.environ["LANG"] = "C.UTF-8"
+    os.environ["LANG"] = "C.UTF-8"
+    os.environ["LC_ALL"] = "C.UTF-8"
+    os.environ["PYTHONUTF8"] = "1"
+    os.environ.setdefault("PYTHONIOENCODING", "utf-8")
+
+    for name in ("C.UTF-8", "en_US.UTF-8", "pt_BR.UTF-8"):
+        try:
+            locale.setlocale(locale.LC_ALL, name)
+            break
+        except locale.Error:
+            continue

@@ -171,7 +171,7 @@ class ListenGUI(Adw.Application):
         # Transcription result must reach the GTK thread without passing str through
         # GLib.idle_add(..., user_data): GObject marshalling can use ASCII and break PT/AR text.
         self._transcription_delivery_lock = threading.Lock()
-        self._pending_transcription: Optional[tuple[str, str]] = None
+        self._pending_transcription: Optional[tuple[str, str, int]] = None
 
         self.connect("activate", self._on_activate)
 
@@ -369,10 +369,12 @@ class ListenGUI(Adw.Application):
         except Exception:
             copy_plain_text(text)
 
-    def _schedule_transcription_ui(self, text: str, language: str = "") -> None:
-        """Queue (text, language) for the main thread; avoids GObject UTF-8/ASCII bugs."""
+    def _schedule_transcription_ui(
+        self, text: str, language: str = "", *, audio_bytes: int = 0
+    ) -> None:
+        """Queue transcription for the main thread; avoids GObject UTF-8/ASCII bugs."""
         with self._transcription_delivery_lock:
-            self._pending_transcription = (text, language)
+            self._pending_transcription = (text, language, audio_bytes)
         GLib.idle_add(self._deliver_pending_transcription)
 
     def _deliver_pending_transcription(self, *_args) -> bool:
@@ -380,7 +382,7 @@ class ListenGUI(Adw.Application):
             pending = self._pending_transcription
             self._pending_transcription = None
         if pending is not None:
-            self._on_transcription_complete(pending[0], pending[1])
+            self._on_transcription_complete(pending[0], pending[1], pending[2])
         return False
 
     def _on_window_realize_corner(self, _window):
@@ -388,18 +390,32 @@ class ListenGUI(Adw.Application):
 
     def _get_active_monitor_geometry(self) -> tuple[int, int, int, int]:
         display = Gdk.Display.get_default()
-        monitor = display.get_primary_monitor()
-        if monitor is None:
+        if display is None:
             return 0, 0, 1920, 1080
 
-        seat = display.get_default_seat()
-        if seat is not None:
-            pointer = seat.get_pointer()
-            if pointer is not None:
-                _, px, py, _ = pointer.get_position()
-                at_pointer = display.get_monitor_at_point(px, py)
-                if at_pointer is not None:
-                    monitor = at_pointer
+        monitor = None
+
+        if getattr(self, "window", None):
+            surface = self.window.get_surface()
+            if surface is not None:
+                monitor = display.get_monitor_at_surface(surface)
+
+        if monitor is None:
+            seat = display.get_default_seat()
+            if seat is not None:
+                pointer = seat.get_pointer()
+                if pointer is not None and hasattr(pointer, "get_position"):
+                    try:
+                        _, px, py, _ = pointer.get_position()
+                        monitor = display.get_monitor_at_point(px, py)
+                    except (AttributeError, TypeError, ValueError):
+                        pass
+
+        if monitor is None:
+            monitor = display.get_primary_monitor()
+
+        if monitor is None:
+            return 0, 0, 1920, 1080
 
         geometry = monitor.get_geometry()
         return geometry.x, geometry.y, geometry.width, geometry.height
@@ -408,22 +424,26 @@ class ListenGUI(Adw.Application):
         if not self.corner_mode:
             return False
 
-        origin_x, origin_y, monitor_width, monitor_height = (
-            self._get_active_monitor_geometry()
-        )
-        width = self.window_width
-        height = self.window_height
-        margin = self.screen_margin
-
-        x = origin_x + monitor_width - width - margin
-        y = origin_y + monitor_height - height - margin
-
-        surface = self.window.get_surface()
-        if surface is not None:
-            surface.move_to_rect(
-                Gdk.Rectangle.new(int(x), int(y), 1, 1),
-                Gdk.SubpixelLayout.UNKNOWN,
+        try:
+            origin_x, origin_y, monitor_width, monitor_height = (
+                self._get_active_monitor_geometry()
             )
+            width = self.window_width
+            height = self.window_height
+            margin = self.screen_margin
+
+            x = origin_x + monitor_width - width - margin
+            y = origin_y + monitor_height - height - margin
+
+            surface = self.window.get_surface()
+            if surface is not None:
+                surface.move_to_rect(
+                    Gdk.Rectangle.new(int(x), int(y), 1, 1),
+                    Gdk.SubpixelLayout.UNKNOWN,
+                )
+        except Exception:
+            pass
+
         return False
 
     def _on_global_hotkey(self) -> None:
@@ -442,6 +462,8 @@ class ListenGUI(Adw.Application):
             self._start_recording()
         elif self._state == self.STATE_RECORDING:
             self._stop_and_transcribe()
+        elif self._state == self.STATE_TRANSCRIBING:
+            self.status_label.set_text("Transcrevendo... aguarde a conclusão")
         elif self._state == self.STATE_RESULT and self._model_ready:
             self._copy_and_reset()
             self._start_recording()
@@ -537,10 +559,6 @@ class ListenGUI(Adw.Application):
             )
             GLib.idle_add(self.action_button.set_sensitive, True)
             GLib.idle_add(self.model_dropdown.set_sensitive, True)
-
-            GLib.idle_add(self.action_button.set_sensitive, True)
-            GLib.idle_add(self.model_dropdown.set_sensitive, True)
-            GLib.idle_add(self._set_model_ready)
 
     def _set_model_ready(self, *_args) -> bool:
         self._model_ready = True
@@ -751,6 +769,10 @@ class ListenGUI(Adw.Application):
             self.status_label.set_text(
                 "Gravando reunião (mic + sistema)... Clique para transcrever"
             )
+        elif self.global_hotkey:
+            self.status_label.set_text(
+                "Gravando... pressione o atalho de novo para parar e salvar"
+            )
         else:
             self.status_label.set_text("Recording... Click to transcribe")
         self.result_label.set_text("")
@@ -790,51 +812,77 @@ class ListenGUI(Adw.Application):
     def _transcribe_audio(self):
         """Transcribe recorded audio (runs in background thread)."""
         audio_data = self._recorder.stop()
+        audio_bytes = len(audio_data)
 
-        if len(audio_data) < 1000:
-            self._schedule_transcription_ui("(no audio captured)", "")
+        if audio_bytes < 1000:
+            self._schedule_transcription_ui("(no audio captured)", "", audio_bytes=0)
+            return
+
+        if self._transcriber is None:
+            self._schedule_transcription_ui(
+                "Error: modelo de transcrição não carregou", "", audio_bytes=audio_bytes
+            )
             return
 
         try:
-            result = self._transcriber.transcribe(audio_data)
+            language_hint = self._settings.language or None
+            result = self._transcriber.transcribe(audio_data, language=language_hint)
             text = result.text.strip()
             language = result.language or ""
-            self._schedule_transcription_ui(text, language)
+            if not text:
+                text = "[sem fala detectada]"
+            self._schedule_transcription_ui(text, language, audio_bytes=audio_bytes)
         except Exception as e:
-            self._schedule_transcription_ui(f"Error: {e}", "")
+            self._schedule_transcription_ui(
+                f"Error: {e}", "", audio_bytes=audio_bytes
+            )
 
-    def _on_transcription_complete(self, text: str, language: str = ""):
+    def _on_transcription_complete(
+        self, text: str, language: str = "", audio_bytes: int = 0
+    ):
         """Handle transcription completion (runs on main thread)."""
-        if (
-            self.auto_copy
-            and text
-            and not text.startswith("Error:")
-            and not text.startswith("(")
-        ):
-            self._clipboard_set_text(text)
+        is_error = text.startswith("Error:")
+        is_no_audio = text == "(no audio captured)"
+        had_audio = audio_bytes >= 1000
 
         saved_path: Optional[Path] = None
+        save_dir = self._resolved_save_directory()
         if (
             self.save_transcriptions
-            and self.save_directory
+            and save_dir is not None
+            and had_audio
             and text
-            and not text.startswith("Error:")
-            and not text.startswith("(")
+            and not is_error
         ):
             try:
                 saved_path = save_transcription_text(
                     text,
-                    self.save_directory,
+                    save_dir,
                     language=language,
                     meeting_mode=self.meeting_mode,
                 )
             except OSError as exc:
                 text = f"Error: não foi possível salvar o arquivo ({exc})"
+                is_error = True
 
         self._last_saved_path = saved_path
 
         if saved_path is not None:
             self._refresh_saved_list()
+
+        if (
+            self.auto_copy
+            and text
+            and not is_error
+            and not is_no_audio
+            and not text.startswith("[sem fala detectada]")
+        ):
+            self._clipboard_set_text(text)
+
+        if getattr(self, "window", None):
+            self.window.present()
+            if self.corner_mode:
+                self._position_bottom_right()
 
         self._last_transcription = text
         self._last_language = language
@@ -861,16 +909,34 @@ class ListenGUI(Adw.Application):
         }
         lang_display = lang_names.get(language, language.upper() if language else "")
 
-        if text and not text.startswith("Error:") and not text.startswith("("):
-            status_msg = "✓ Copiado para a área de transferência!"
-            if saved_path is not None:
-                status_msg += f" • Salvo em {saved_path.name}"
-            if lang_display:
-                status_msg += f" • {lang_display} detectado"
+        if text and not is_error and not is_no_audio:
+            if text.startswith("[sem fala detectada]"):
+                status_msg = "Áudio gravado, mas nenhuma fala foi reconhecida"
+                if saved_path is not None:
+                    status_msg += f" • salvo em {saved_path.name}"
+            elif saved_path is not None:
+                status_msg = f"✓ Salvo em {saved_path.name}"
+                if self.auto_copy:
+                    status_msg += " • copiado"
+                if lang_display:
+                    status_msg += f" • {lang_display} detectado"
+            elif self.auto_copy:
+                status_msg = "✓ Copiado para a área de transferência!"
+                if lang_display:
+                    status_msg += f" • {lang_display} detectado"
+            else:
+                status_msg = "✓ Transcrição concluída"
+                if lang_display:
+                    status_msg += f" • {lang_display} detectado"
             self.status_label.set_text(status_msg)
             self.result_label.set_text(f'"{text}"')
         else:
-            self.status_label.set_text("Ready • Click to start new recording")
+            if is_no_audio:
+                self.status_label.set_text(
+                    "Nenhum áudio capturado — verifique o microfone no sistema"
+                )
+            else:
+                self.status_label.set_text("Ready • Click to start new recording")
             self.result_label.set_text(text)
 
     def _copy_and_reset(self):

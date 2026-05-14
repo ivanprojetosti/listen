@@ -10,7 +10,7 @@ from typing import Optional, Callable
 
 import pyaudio
 
-from .audio_sources import get_default_monitor_source
+from .audio_sources import get_default_monitor_source, ensure_default_input_ready
 
 
 class AudioRecorder:
@@ -111,6 +111,8 @@ class AudioRecorder:
 
             self._frames = []
             self._is_recording = True
+
+            ensure_default_input_ready()
 
             if self._meeting_mode:
                 self._start_meeting_capture(input_device_index)

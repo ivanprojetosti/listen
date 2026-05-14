@@ -88,6 +88,10 @@ def _configure_settings_interactive() -> ListenSettings:
         f"Atalho: [cyan]{settings.hotkey}[/cyan] • "
         f"Salvar em: [cyan]{save_dir}[/cyan]"
     )
+    console.print(
+        "\n[dim]Para usar o atalho, inicie o Listen em segundo plano:[/dim] "
+        "[bold cyan]listen --daemon[/bold cyan]"
+    )
     return settings
 
 
@@ -573,11 +577,18 @@ Examples:
                     sys.exit(1)
                 raise
             settings = ListenSettings.load()
+            if not any((args.quick, args.daemon, args.cli, args.configure)):
+                console.print(
+                    "[dim]Dica: use [cyan]listen --daemon[/cyan] para o atalho global "
+                    f"([cyan]{settings.hotkey}[/cyan]) e salvar em "
+                    f"[cyan]{settings.resolved_save_directory()}[/cyan][/dim]"
+                )
             run_gui(
                 model_size=args.model,
                 auto_copy=not args.no_copy,
                 save_transcriptions=settings.save_transcriptions,
                 save_directory=settings.resolved_save_directory(),
+                meeting_mode=settings.meeting_mode,
             )
     except Exception as e:
         console.print(f"[red]Error: {e}[/red]")
