@@ -1,0 +1,18 @@
+---
+description: Convenções gerais do projeto Listen (Python/GTK)
+alwaysApply: true
+---
+
+# Listen — regras do projeto
+
+- Código em `src/listen_app/`; GUI em `gui.py` (GTK4 + Libadwaita).
+- Configuração persistente: `~/.config/listen/config.json` via `ListenSettings`.
+- **Whisper** (dropdown no header) ≠ **OpenRouter** (campo em Configurações). Nunca misturar modelos.
+- OpenRouter: `meeting_summary_ai.py`, URL `https://openrouter.ai/api/v1/chat/completions`, modelo em `openrouter_model`.
+- Widgets GTK só na thread principal; workers recebem dados já lidos (ex.: `MeetingAISummaryOptions` capturado antes do `threading.Thread`).
+- `FileChooserNative`: manter referência em `self._native_file_chooser` até `response`.
+- Responder ao utilizador em português na UI e mensagens de erro.
+
+## Documentação por página
+
+Regras de cada ecrã: `docs/pages/*.md`. **Ao alterar comportamento de uma página ou regra de negócio, actualizar o `.md` correspondente** (ver `docs/pages/README.md`).

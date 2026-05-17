@@ -2,7 +2,7 @@
 
 import io
 import subprocess
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional, Literal
 
 from faster_whisper import WhisperModel
@@ -20,9 +20,38 @@ class TranscriptionResult:
     language: str
     language_probability: float
     duration: float  # Audio duration in seconds
+    translation: str | None = None
+    translation_language: str | None = None
 
     def __str__(self) -> str:
         return self.text
+
+    def display_text(self) -> str:
+        """Texto original e tradução (se existir) para UI / clipboard."""
+        from .transcription_format import format_transcription_display
+
+        return format_transcription_display(
+            self.text,
+            language=self.language,
+            translation=self.translation,
+            translation_language=self.translation_language,
+        )
+
+
+@dataclass
+class TranscriptSegment:
+    """One timed fragment from the ASR output."""
+
+    start: float
+    end: float
+    text: str
+
+
+@dataclass
+class TranscriptionWithSegments(TranscriptionResult):
+    """Transcription including per-segment timestamps."""
+
+    segments: list[TranscriptSegment] = field(default_factory=list)
 
 
 class Transcriber:
@@ -145,7 +174,8 @@ class Transcriber:
         language: Optional[str],
         *,
         vad_filter: bool,
-    ) -> TranscriptionResult:
+        with_segments: bool = False,
+    ) -> TranscriptionResult | TranscriptionWithSegments:
         if isinstance(audio_source, io.BytesIO):
             audio_source.seek(0)
 
@@ -165,19 +195,26 @@ class Transcriber:
             return str(val).strip()
 
         text_parts: list[str] = []
+        timed: list[TranscriptSegment] = []
         for segment in segments:
-            text_parts.append(_as_text(segment.text))
+            t = _as_text(segment.text)
+            text_parts.append(t)
+            if with_segments:
+                timed.append(TranscriptSegment(segment.start, segment.end, t))
 
         full_text = " ".join(text_parts)
         lang_raw = info.language
         detected_language = _as_text(lang_raw) if lang_raw is not None else ""
 
-        return TranscriptionResult(
+        base = dict(
             text=full_text,
             language=detected_language,
             language_probability=info.language_probability,
             duration=info.duration,
         )
+        if with_segments:
+            return TranscriptionWithSegments(segments=timed, **base)
+        return TranscriptionResult(**base)
 
     def transcribe(
         self, audio_source: str | bytes, language: Optional[str] = None
@@ -201,6 +238,29 @@ class Transcriber:
         result = self._run_transcribe(audio_buffer, language, vad_filter=True)
         if not result.text.strip() and result.duration >= 0.5:
             result = self._run_transcribe(audio_buffer, language, vad_filter=False)
+        return result
+
+    def transcribe_with_segments(
+        self, audio_source: str | bytes, language: Optional[str] = None
+    ) -> TranscriptionWithSegments:
+        """
+        Transcribe and return each timed segment (for meeting / chapter splits).
+        """
+        audio_buffer: str | io.BytesIO
+        if isinstance(audio_source, bytes):
+            audio_buffer = io.BytesIO(audio_source)
+        else:
+            audio_buffer = audio_source
+
+        result = self._run_transcribe(
+            audio_buffer, language, vad_filter=True, with_segments=True
+        )
+        assert isinstance(result, TranscriptionWithSegments)
+        if not result.text.strip() and result.duration >= 0.5:
+            result = self._run_transcribe(
+                audio_buffer, language, vad_filter=False, with_segments=True
+            )
+            assert isinstance(result, TranscriptionWithSegments)
         return result
 
     def get_model_info(self) -> dict:

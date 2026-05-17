@@ -1,0 +1,19 @@
+---
+description: GUI Listen — páginas, navegação e ficheiros
+globs: src/listen_app/gui.py,docs/pages/**
+alwaysApply: false
+---
+
+# GUI — páginas do menu lateral
+
+| `page_id` | Ficheiro de regras | Métodos principais |
+|-----------|-------------------|-------------------|
+| `record` | `docs/pages/record.md` | `_build_page_record` |
+| `history` | `docs/pages/history.md` | `_build_page_history` |
+| `video` | `docs/pages/video.md` | `_build_page_video` |
+| `youtube` | `docs/pages/youtube.md` | `_build_page_youtube` |
+| `settings` | `docs/pages/settings.md` | `_build_page_settings` |
+
+- Navegação: `Adw.NavigationSplitView` + `Gtk.Stack` (`_show_page`, `_NAV_ITEMS`).
+- Antes de processar vídeo/YouTube: `_sync_openrouter_prefs_to_settings()` na thread principal, depois `ai_opts = self._meeting_ai_options()` passado ao worker (`provider`: `cursor` ou `openrouter`).
+- Alterou UI ou fluxo de uma página → actualizar o `.md` em `docs/pages/`.

@@ -15,11 +15,61 @@ class SavedTranscription:
     language: str | None = None
 
 
+@dataclass
+class ParsedTranscription:
+    original: str
+    language: str | None = None
+    translation: str | None = None
+    translation_language: str | None = None
+
+    def display_text(self) -> str:
+        from .transcription_format import format_transcription_display
+
+        return format_transcription_display(
+            self.original,
+            language=self.language or "",
+            translation=self.translation,
+            translation_language=self.translation_language,
+        )
+
+
 def read_transcription_text(path: Path) -> str:
-    """Read transcription body from a saved .txt file."""
+    """Read transcription body from a saved .txt file (original + tradução se houver)."""
+    return parse_saved_transcription(path).display_text()
+
+
+def parse_saved_transcription(path: Path) -> ParsedTranscription:
+    """Separa original, metadados e tradução de um .txt guardado."""
     lines = path.read_text(encoding="utf-8").splitlines()
-    text_lines = [line for line in lines if not line.startswith("# language:")]
-    return "\n".join(text_lines).strip()
+    language: str | None = None
+    translation_language: str | None = None
+    translation_lines: list[str] = []
+    original_lines: list[str] = []
+    in_translation = False
+
+    for line in lines:
+        if line.startswith("# language:"):
+            language = line.split(":", 1)[1].strip() or None
+            continue
+        if line.startswith("# translation:"):
+            translation_language = line.split(":", 1)[1].strip() or None
+            in_translation = True
+            continue
+        if line.startswith("# "):
+            continue
+        if in_translation:
+            translation_lines.append(line)
+        else:
+            original_lines.append(line)
+
+    original = "\n".join(original_lines).strip()
+    translation = "\n".join(translation_lines).strip() or None
+    return ParsedTranscription(
+        original=original,
+        language=language,
+        translation=translation,
+        translation_language=translation_language,
+    )
 
 
 def list_saved_transcriptions(
@@ -41,17 +91,8 @@ def list_saved_transcriptions(
     for path in files:
         try:
             created_at = datetime.fromtimestamp(path.stat().st_mtime)
-            raw_lines = path.read_text(encoding="utf-8").splitlines()
-            language: str | None = None
-            text_lines: list[str] = []
-            for line in raw_lines:
-                if line.startswith("# language:"):
-                    language = line.split(":", 1)[1].strip() or None
-                else:
-                    text_lines.append(line)
-
-            text = "\n".join(text_lines).strip()
-            preview = text.replace("\n", " ")
+            parsed = parse_saved_transcription(path)
+            preview = parsed.original.replace("\n", " ")
             if len(preview) > 80:
                 preview = preview[:77] + "..."
 
@@ -60,7 +101,7 @@ def list_saved_transcriptions(
                     path=path,
                     created_at=created_at,
                     preview=preview or "(vazio)",
-                    language=language,
+                    language=parsed.language,
                 )
             )
         except OSError:
@@ -74,6 +115,8 @@ def save_transcription_text(
     directory: Path,
     *,
     language: str = "",
+    translation: str | None = None,
+    translation_language: str | None = None,
     meeting_mode: bool = False,
 ) -> Path:
     """Write one transcription to a timestamped .txt file."""
@@ -81,7 +124,11 @@ def save_transcription_text(
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     filepath = directory / f"listen_{timestamp}.txt"
 
-    lines = [text]
+    lines = [text.strip()]
+    if translation and translation.strip():
+        lines.append("")
+        lines.append(f"# translation: {translation_language or '?'}")
+        lines.append(translation.strip())
     if meeting_mode:
         lines.append("")
         lines.append("# mode: meeting")

@@ -1,0 +1,14 @@
+---
+description: Integração OpenRouter e indice.txt gerado por IA
+globs: src/listen_app/meeting_summary_ai.py,src/listen_app/meeting_analysis.py,src/listen_app/settings.py
+alwaysApply: false
+---
+
+# OpenRouter
+
+- Modelo: **sempre** `ListenSettings.openrouter_model` / `resolved_ai_model()` — não hardcodar `gpt-4o-mini` excepto fallback vazio.
+- Chave: `openrouter_api_key` em config ou env `LISTEN_OPENROUTER_API_KEY`.
+- Chamada: SDK `openai.OpenAI(base_url=..., default_headers=HTTP-Referer, X-Title)`.
+- `generate_meeting_indice_ai()` só corre se `enabled` e `provider == "openrouter"`.
+- Modo Cursor: `cursor_mode` / `provider == "cursor"` → `meeting_summary_cursor.generate_meeting_indice_cursor()`.
+- Regras: `docs/pages/openrouter-ai.md`, `docs/pages/cursor-mode.md`, `docs/pages/settings.md`.

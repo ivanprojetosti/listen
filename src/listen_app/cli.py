@@ -13,6 +13,7 @@ Controls:
 """
 
 import argparse
+import os
 import sys
 import threading
 from pathlib import Path
@@ -104,7 +105,11 @@ def _print_settings(settings: ListenSettings) -> None:
             f"Canto inferior direito: [cyan]{'sim' if settings.corner_mode else 'não'}[/cyan]\n"
             f"Gravar ao abrir: [cyan]{'sim' if settings.auto_record else 'não'}[/cyan]\n"
             f"Salvar transcrições: [cyan]{'sim' if settings.save_transcriptions else 'não'}[/cyan]\n"
-            f"Copiar automaticamente: [cyan]{'sim' if settings.auto_copy else 'não'}[/cyan]",
+            f"Copiar automaticamente: [cyan]{'sim' if settings.auto_copy else 'não'}[/cyan]\n"
+            f"Resumo IA no indice: [cyan]{'sim' if settings.meeting_ai_summary else 'não'}[/cyan]\n"
+            f"Modo Cursor (local): [cyan]{'sim' if settings.cursor_mode else 'não'}[/cyan]\n"
+            f"Modelo OpenRouter: [cyan]{settings.resolved_ai_model()}[/cyan]\n"
+            f"Modelo Cursor: [cyan]{settings.cursor_model or '(predefinido)'}[/cyan]",
             title="[bold blue]Listen — configuração[/bold blue]",
             border_style="blue",
         )
@@ -245,13 +250,21 @@ class ListenApp:
             if len(audio_data) > 1000:  # Minimum audio length check
                 try:
                     transcriber = self._get_transcriber()
-                    result = transcriber.transcribe(audio_data)
+                    from .transcription_capture import transcribe_capture
 
-                    self._last_transcription = result.text
+                    settings_rec = ListenSettings.load()
+                    result = transcribe_capture(
+                        transcriber,
+                        audio_data,
+                        whisper_language=None,
+                        translation_target=settings_rec.resolved_translation_target(),
+                    )
+
+                    self._last_transcription = result.display_text()
                     self._last_language = result.language
 
-                    if self.auto_copy and result.text:
-                        copy_plain_text(result.text)
+                    if self.auto_copy and self._last_transcription:
+                        copy_plain_text(self._last_transcription)
 
                 except Exception as e:
                     console.print(f"[red]Error: {e}[/red]")
@@ -414,6 +427,51 @@ Examples:
         help="Não salvar transcrições em arquivo .txt",
     )
 
+    meeting = parser.add_mutually_exclusive_group()
+    meeting.add_argument(
+        "--meeting-video",
+        metavar="PATH",
+        help="Transcreve um vídeo local, agrupa por tópicos (pausas) e salva .txt na pasta configurada",
+    )
+    meeting.add_argument(
+        "--meeting-youtube",
+        metavar="URL",
+        help="Baixa um vídeo do YouTube (yt-dlp), transcreve e salva tópicos como em --meeting-video",
+    )
+
+    parser.add_argument(
+        "--topic-gap",
+        type=float,
+        default=10.0,
+        metavar="SEC",
+        help="Pausa mínima entre falas (s) para novo tópico (com --meeting-video ou --meeting-youtube)",
+    )
+
+    parser.add_argument(
+        "--meeting-ai-summary",
+        action="store_true",
+        help="Gera «Resumo gerado por IA» no indice.txt (OpenAI); requer pip install .[ai] e LISTEN_OPENAI_API_KEY",
+    )
+
+    parser.add_argument(
+        "--openai-model",
+        default=None,
+        metavar="NAME",
+        help="Modelo OpenRouter (ex.: openai/gpt-4o-mini); omissão = config",
+    )
+
+    parser.add_argument(
+        "--test-openrouter",
+        action="store_true",
+        help="Testa a chave OpenRouter (equivalente ao POST /chat/completions) e mostra o curl",
+    )
+
+    parser.add_argument(
+        "--test-cursor",
+        action="store_true",
+        help="Testa o Cursor Agent local (cursor agent --print)",
+    )
+
     parser.add_argument(
         "--cli",
         "-c",
@@ -502,13 +560,179 @@ Examples:
         and not args.cli
         and not args.configure
         and not args.show_config
+        and not args.meeting_video
+        and not args.meeting_youtube
+        and not args.test_cursor
     )
 
     if config_only:
         _print_settings(settings)
         return
 
+    if args.test_openrouter:
+        from .meeting_summary_ai import (
+            MeetingAISummaryOptions,
+            openrouter_curl_example,
+            test_openrouter_connection,
+        )
+
+        opts = MeetingAISummaryOptions(
+            enabled=True,
+            model=settings.resolved_ai_model(),
+            api_key=settings.openrouter_api_key,
+            base_url=settings.resolved_ai_base_url(),
+        )
+        console.print("[bold]Equivalente curl (o app usa o SDK openai, não curl):[/bold]\n")
+        console.print(
+            openrouter_curl_example(model=settings.resolved_ai_model())
+        )
+        if settings.openrouter_api_key:
+            console.print(
+                "[dim]Use: export OPENROUTER_API_KEY='sua-chave' antes do curl[/dim]\n"
+            )
+        console.print()
+        ok, msg = test_openrouter_connection(opts)
+        if ok:
+            console.print(f"[green]✓[/green] {msg}")
+        else:
+            console.print(f"[red]✗[/red] {msg}")
+            sys.exit(1)
+        return
+
+    if args.test_cursor:
+        from .meeting_summary_ai import MeetingAISummaryOptions
+        from .meeting_summary_cursor import test_cursor_connection
+
+        opts = MeetingAISummaryOptions(
+            enabled=True,
+            provider="cursor",
+            cursor_cli=settings.cursor_cli,
+            cursor_model=settings.cursor_model,
+        )
+        ok, msg = test_cursor_connection(opts)
+        if ok:
+            console.print(f"[green]✓[/green] {msg}")
+        else:
+            console.print(f"[red]✗[/red] {msg}")
+            sys.exit(1)
+        return
+
     quick_auto_copy = settings.auto_copy if not args.no_copy else False
+
+    if (args.meeting_video or args.meeting_youtube) and (
+        args.topic_gap < 0.5 or args.topic_gap > 300
+    ):
+        console.print("[red]--topic-gap deve estar entre 0.5 e 300 segundos[/red]")
+        sys.exit(1)
+
+    if args.meeting_video or args.meeting_youtube:
+        from .meeting_analysis import (
+            analyze_video_to_topics,
+            analyze_youtube_to_topics,
+            ensure_youtube_download_url,
+            ffmpeg_available,
+            yt_dlp_available,
+        )
+        from .meeting_summary_ai import MeetingAISummaryOptions
+
+        if not ffmpeg_available():
+            console.print(
+                "[red]ffmpeg não encontrado no PATH. "
+                "Instale com: sudo apt install ffmpeg[/red]"
+            )
+            sys.exit(1)
+
+        settings_mv = ListenSettings.load()
+        out_base = settings_mv.resolved_save_directory()
+        lang = settings_mv.resolved_whisper_force_language()
+
+        console.print("[dim]Carregando modelo Whisper...[/dim]")
+        try:
+            tr = Transcriber(model_size=args.model)
+        except Exception as exc:
+            console.print(f"[red]Erro ao carregar modelo: {exc}[/red]")
+            sys.exit(1)
+
+        try:
+            ai_opts = MeetingAISummaryOptions(
+                enabled=bool(
+                    args.meeting_ai_summary or settings_mv.resolved_meeting_ai_enabled()
+                ),
+                provider=settings_mv.resolved_ai_provider(),
+                model=(
+                    args.openai_model
+                    or settings_mv.resolved_ai_model()
+                ),
+                api_key=settings_mv.openrouter_api_key,
+                base_url=settings_mv.resolved_ai_base_url(),
+                cursor_cli=settings_mv.cursor_cli or "cursor",
+                cursor_model=settings_mv.cursor_model,
+            )
+
+            if args.meeting_youtube:
+                if not yt_dlp_available():
+                    console.print(
+                        "[red]yt-dlp não encontrado neste ambiente. "
+                        "Instale as dependências do projeto: [cyan]pip install -e .[/cyan][/red]"
+                    )
+                    sys.exit(1)
+                try:
+                    yurl = ensure_youtube_download_url(args.meeting_youtube)
+                except ValueError as exc:
+                    console.print(f"[red]{exc}[/red]")
+                    sys.exit(1)
+                console.print(
+                    f"[dim]Baixando e processando vídeo do YouTube...[/dim]\n"
+                    f"[dim]Pausa para novo tópico: {args.topic_gap:g} s[/dim]"
+                )
+                out_dir = analyze_youtube_to_topics(
+                    yurl,
+                    tr,
+                    out_base,
+                    language=lang,
+                    gap_seconds=args.topic_gap,
+                    ai_summary_options=ai_opts,
+                )
+            else:
+                video_path = Path(args.meeting_video).expanduser()
+                if not video_path.is_file():
+                    console.print(f"[red]Arquivo não encontrado: {video_path}[/red]")
+                    sys.exit(1)
+
+                console.print(
+                    f"[dim]Extraindo áudio e transcrevendo [cyan]{video_path.name}[/cyan]...[/dim]\n"
+                    f"[dim]Pausa para novo tópico: {args.topic_gap:g} s[/dim]"
+                )
+                out_dir = analyze_video_to_topics(
+                    video_path,
+                    tr,
+                    out_base,
+                    language=lang,
+                    gap_seconds=args.topic_gap,
+                    ai_summary_options=ai_opts,
+                )
+        except Exception as exc:
+            console.print(f"[red]Erro: {exc}[/red]")
+            sys.exit(1)
+
+        footer_topics = (
+            "[dim]Opcional: [cyan]pip install .[topics][/cyan] — títulos por TF-IDF.[/dim]"
+        )
+        footer_ai = (
+            "\n[dim]Resumo IA pedido à OpenAI — ver secção «Resumo gerado por IA» no indice.txt.[/dim]"
+            if ai_opts.enabled
+            else ""
+        )
+        console.print(
+            Panel(
+                f"[green]Concluído[/green]\n\n"
+                f"Pasta: [cyan]{out_dir}[/cyan]\n"
+                f"Abra [bold]indice.txt[/bold] e os arquivos numerados por tópico.\n\n"
+                f"{footer_topics}{footer_ai}",
+                border_style="green",
+            )
+        )
+        return
 
     try:
         if args.configure:
