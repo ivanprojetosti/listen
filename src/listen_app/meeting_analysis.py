@@ -108,11 +108,11 @@ def _local_now() -> datetime:
     return datetime.now().astimezone()
 
 
-def _folder_name_with_local_datetime(stem: str) -> str:
+def _folder_name_with_local_datetime(stem: str, *, prefix: str = "reuniao") -> str:
     """Nome da pasta de saída: slug + data e hora locais."""
     now = _local_now()
     safe = _slugify(stem, 40) or "reuniao"
-    return f"reuniao_{safe}_{now:%Y-%m-%d}_{now:%H-%M-%S}"
+    return f"{prefix}_{safe}_{now:%Y-%m-%d}_{now:%H-%M-%S}"
 
 
 def _fmt_hms(seconds: float) -> str:
@@ -237,6 +237,61 @@ def is_probably_youtube_url(url: str) -> bool:
     return "youtube.com/" in u or "youtu.be/" in u or u.startswith("youtu.be/")
 
 
+def is_remote_media_url(raw: str) -> bool:
+    u = raw.strip().lower()
+    return u.startswith("http://") or u.startswith("https://")
+
+
+def is_google_drive_url(url: str) -> bool:
+    u = url.strip().lower()
+    return "drive.google.com/" in u or "docs.google.com/" in u
+
+
+def ensure_media_download_url(raw: str) -> str:
+    """
+    Valida URL para download automático (yt-dlp): YouTube, Google Drive, etc.
+    O Listen descarrega para pasta temporária — não precisa de ficheiro local.
+    """
+    u = raw.strip()
+    if not u:
+        raise ValueError(
+            "Cole o link do vídeo (ex.: Google Drive da gravação Meet ou YouTube)."
+        )
+
+    low = u.lower()
+    if low.endswith(".txt"):
+        raise ValueError(
+            "Isto parece um ficheiro de transcrição (.txt), não um link de vídeo."
+        )
+    for ext in (".mp4", ".mkv", ".webm", ".mov", ".avi", ".mpeg", ".mpg", ".m4a"):
+        if low.endswith(ext) and "://" not in u:
+            normalized = u.replace("\\", "/")
+            if normalized.count("/") == 0 or normalized.startswith(
+                ("/", "./", "../", "~/")
+            ):
+                raise ValueError(
+                    "Isto parece um ficheiro local. Use «Escolher vídeo» ou o caminho completo."
+                )
+
+    if "meet.google.com/" in low:
+        raise ValueError(
+            "O Google Meet não permite descarregar pelo link da reunião ao vivo. "
+            "Abra a gravação no Google Drive (ícone Gravações ou e-mail do Google), "
+            "copie o link do ficheiro de vídeo (drive.google.com/file/d/…) e cole aqui. "
+            "O vídeo tem de estar partilhado com a sua conta ou «Qualquer pessoa com o link»."
+        )
+
+    if not is_remote_media_url(u):
+        if not u.startswith(("http://", "https://")):
+            u = "https://" + u.lstrip("/")
+        if not is_remote_media_url(u):
+            raise ValueError(
+                "Indique um link completo (https://…), por exemplo gravação no Google Drive."
+            )
+
+    return u
+
+
 def ensure_youtube_download_url(raw: str) -> str:
     """
     Valida entrada antes do yt-dlp. Evita nomes de ficheiros locais (.txt, .mp4) confundidos com URL.
@@ -273,20 +328,28 @@ def ensure_youtube_download_url(raw: str) -> str:
     return u
 
 
-def download_youtube_video(url: str, work_dir: Path) -> tuple[Path, str]:
+def download_media_from_url(url: str, work_dir: Path) -> tuple[Path, str]:
     """
-    Baixa o vídeo (ou melhor áudio+vídeo disponível) para work_dir.
+    Baixa o vídeo com yt-dlp para work_dir (temporário; não precisa de ficheiro local).
     Retorna (caminho local, título para nomear pasta).
     """
     import yt_dlp
 
-    url = ensure_youtube_download_url(url)
-
+    url = ensure_media_download_url(url)
     work_dir.mkdir(parents=True, exist_ok=True)
 
     probe_opts: dict = {"quiet": True, "noplaylist": True, "no_warnings": True}
-    with yt_dlp.YoutubeDL(probe_opts) as ydl_probe:
-        info = ydl_probe.extract_info(url, download=False)
+    try:
+        with yt_dlp.YoutubeDL(probe_opts) as ydl_probe:
+            info = ydl_probe.extract_info(url, download=False)
+    except Exception as exc:
+        hint = ""
+        if is_google_drive_url(url):
+            hint = (
+                " Verifique se a gravação está partilhada com a sua conta Google "
+                "ou «Qualquer pessoa com o link»."
+            )
+        raise RuntimeError(f"Não foi possível aceder ao link: {exc}.{hint}") from exc
 
     vid = str(info.get("id") or "video")
     title = str(info.get("title") or vid).strip() or vid
@@ -301,8 +364,16 @@ def download_youtube_video(url: str, work_dir: Path) -> tuple[Path, str]:
         "noplaylist": True,
     }
 
-    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        ydl.download([url])
+    try:
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            ydl.download([url])
+    except Exception as exc:
+        hint = ""
+        if is_google_drive_url(url):
+            hint = (
+                " No Drive, abra a gravação → Partilhar → acesso com link ou a sua conta."
+            )
+        raise RuntimeError(f"Download do vídeo falhou: {exc}.{hint}") from exc
 
     exts = (".mp4", ".webm", ".mkv", ".mov", ".m4a", ".opus", ".ogg", ".wav")
     candidates = [p for p in work_dir.glob(f"{vid}.*") if p.suffix.lower() in exts]
@@ -315,6 +386,12 @@ def download_youtube_video(url: str, work_dir: Path) -> tuple[Path, str]:
 
     media_path = max(candidates, key=lambda p: p.stat().st_mtime)
     return media_path, title
+
+
+def download_youtube_video(url: str, work_dir: Path) -> tuple[Path, str]:
+    """Baixa vídeo do YouTube (validação restrita a URLs YouTube)."""
+    url = ensure_youtube_download_url(url)
+    return download_media_from_url(url, work_dir)
 
 
 def extract_audio_wav_16k_mono(video_path: Path, wav_path: Path) -> None:
@@ -766,6 +843,101 @@ def analyze_media_to_topics(
     return out_dir
 
 
+def analyze_video_google_meet(
+    video_path: Path,
+    transcriber: Transcriber,
+    output_base_dir: Path,
+    *,
+    language: str | None = None,
+    source_url: str | None = None,
+    folder_stem: str | None = None,
+) -> Path:
+    """
+    Modo Google Meet: transcreve e grava transcricao.txt com [início – fim] por frase.
+    """
+    from .google_meet_analysis import save_chronological_transcription
+
+    if not ffmpeg_available():
+        raise RuntimeError(
+            "ffmpeg não encontrado no PATH. Instale com: sudo apt install ffmpeg"
+        )
+    video_path = video_path.expanduser().resolve()
+    if not video_path.is_file():
+        raise FileNotFoundError(str(video_path))
+
+    created_at = _local_now()
+    stem = folder_stem or video_path.stem
+    out_dir = output_base_dir / _folder_name_with_local_datetime(
+        stem, prefix="reuniao_meet"
+    )
+    whisper_model = str(getattr(transcriber, "model_size", "") or "")
+    try:
+        whisper_model = str(transcriber.get_model_info().get("model_size", whisper_model))
+    except Exception:
+        pass
+
+    with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
+        wav_path = Path(tmp.name)
+
+    try:
+        extract_audio_wav_16k_mono(video_path, wav_path)
+        result = transcriber.transcribe_with_segments(str(wav_path), language=language)
+        segments = list(result.segments)
+        if not segments and result.text.strip():
+            segments = [
+                TranscriptSegment(
+                    start=0.0,
+                    end=float(result.duration),
+                    text=result.text.strip(),
+                )
+            ]
+        save_chronological_transcription(
+            segments,
+            out_dir,
+            created_at=created_at,
+            whisper_model=whisper_model,
+            source_video=video_path,
+            source_url=source_url,
+            language=result.language or (language or ""),
+        )
+    finally:
+        try:
+            wav_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+    return out_dir
+
+
+def analyze_url_google_meet(
+    url: str,
+    transcriber: Transcriber,
+    output_base_dir: Path,
+    *,
+    language: str | None = None,
+) -> Path:
+    """
+    Modo Google Meet a partir de link (Google Drive, YouTube, …).
+    Download automático; saída em transcricao.txt com timestamps.
+    """
+    if not yt_dlp_available():
+        raise RuntimeError(
+            "yt-dlp não está disponível. Instale: pip install -e ."
+        )
+
+    url = ensure_media_download_url(url)
+    with tempfile.TemporaryDirectory() as tmpdir:
+        media_path, title = download_media_from_url(url, Path(tmpdir))
+        return analyze_video_google_meet(
+            media_path,
+            transcriber,
+            output_base_dir,
+            language=language,
+            source_url=url,
+            folder_stem=title,
+        )
+
+
 def analyze_video_to_topics(
     video_path: Path,
     transcriber: Transcriber,
@@ -775,6 +947,7 @@ def analyze_video_to_topics(
     gap_seconds: float = 10.0,
     source_url: str | None = None,
     ai_summary_options: MeetingAISummaryOptions | None = None,
+    google_meet_mode: bool = False,
 ) -> Path:
     """
     Extrai áudio, transcreve com segmentos, agrupa tópicos e salva .txt.
@@ -783,6 +956,15 @@ def analyze_video_to_topics(
     video_path = video_path.expanduser().resolve()
     if not video_path.is_file():
         raise FileNotFoundError(str(video_path))
+
+    if google_meet_mode:
+        return analyze_video_google_meet(
+            video_path,
+            transcriber,
+            output_base_dir,
+            language=language,
+            source_url=source_url,
+        )
 
     return analyze_media_to_topics(
         video_path,
@@ -805,6 +987,7 @@ def analyze_youtube_to_topics(
     language: str | None = None,
     gap_seconds: float = 10.0,
     ai_summary_options: MeetingAISummaryOptions | None = None,
+    google_meet_mode: bool = False,
 ) -> Path:
     """
     Baixa o vídeo com yt-dlp para pasta temporária e reutiliza o fluxo de tópicos.
@@ -813,6 +996,12 @@ def analyze_youtube_to_topics(
         raise RuntimeError(
             "yt-dlp não está disponível neste ambiente Python. "
             "Reinstale o Listen com dependências completas: pip install -e ."
+        )
+
+    url = ensure_youtube_download_url(url)
+    if google_meet_mode:
+        return analyze_url_google_meet(
+            url, transcriber, output_base_dir, language=language
         )
 
     with tempfile.TemporaryDirectory() as tmpdir:

@@ -29,8 +29,10 @@ from .transcription_store import (
     save_transcription_text,
 )
 from .meeting_analysis import (
+    analyze_url_google_meet,
     analyze_video_to_topics,
     analyze_youtube_to_topics,
+    ensure_media_download_url,
     ensure_youtube_download_url,
     ffmpeg_available,
     yt_dlp_available,
@@ -524,12 +526,46 @@ class ListenGUI(Adw.Application):
         video_pick_row.append(self.video_browse_button)
         page.append(video_pick_row)
 
+        meet_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
+        meet_label = Gtk.Label(label="Modo Google Meet")
+        meet_label.set_xalign(0)
+        meet_row.append(meet_label)
+        self.video_google_meet_switch = Gtk.Switch()
+        self.video_google_meet_switch.set_active(self._settings.video_google_meet_mode)
+        self.video_google_meet_switch.connect(
+            "notify::active", self._on_video_google_meet_toggled
+        )
+        meet_row.append(self.video_google_meet_switch)
+        page.append(meet_row)
+
+        self.video_meet_hint_label = Gtk.Label(
+            label=(
+                "Cole o link da gravação no Google Drive (Meet → Gravações) ou escolha "
+                "um ficheiro local. Gera transcricao.txt com [horário – horário] em cada frase."
+            )
+        )
+        self.video_meet_hint_label.set_xalign(0)
+        self.video_meet_hint_label.set_wrap(True)
+        self.video_meet_hint_label.add_css_class("dim-label")
+        self.video_meet_hint_label.set_visible(self._settings.video_google_meet_mode)
+        page.append(self.video_meet_hint_label)
+
+        self.video_url_entry = Gtk.Entry()
+        self.video_url_entry.set_placeholder_text(
+            "Link da gravação (Google Drive, YouTube…) — download automático"
+        )
+        self.video_url_entry.set_visible(self._settings.video_google_meet_mode)
+        self.video_url_entry.connect("changed", self._on_video_url_changed)
+        page.append(self.video_url_entry)
+
         self.video_topics_button = Gtk.Button(label="▶ Gerar tópicos")
         self.video_topics_button.add_css_class("pill")
         self.video_topics_button.add_css_class("suggested-action")
         self.video_topics_button.connect("clicked", self._on_video_topics_clicked)
         self.video_topics_button.set_sensitive(False)
         page.append(self.video_topics_button)
+        if self._settings.video_google_meet_mode:
+            self.video_topics_button.set_label("▶ Analisar reunião (Meet)")
 
         self.video_result_label = Gtk.Label(label="")
         self.video_result_label.set_xalign(0)
@@ -1211,9 +1247,20 @@ class ListenGUI(Adw.Application):
             and self._transcriber is not None
         )
         has_video = self._selected_video_path is not None
+        meet_mode = bool(
+            getattr(self, "video_google_meet_switch", None)
+            and self.video_google_meet_switch.get_active()
+        )
+        has_url = bool(
+            meet_mode
+            and hasattr(self, "video_url_entry")
+            and self.video_url_entry.get_text().strip()
+        )
         self.video_browse_button.set_sensitive(can_browse)
         self.video_path_entry.set_sensitive(can_browse)
-        self.video_topics_button.set_sensitive(can_process and has_video)
+        if hasattr(self, "video_url_entry"):
+            self.video_url_entry.set_sensitive(can_browse and meet_mode)
+        self.video_topics_button.set_sensitive(can_process and (has_video or has_url))
         self.youtube_analyze_button.set_sensitive(can_process)
         self.youtube_url_entry.set_sensitive(can_process)
 
@@ -1323,6 +1370,25 @@ class ListenGUI(Adw.Application):
 
         self._settings.meeting_mode = self.meeting_mode
         self._settings.save()
+
+    def _on_video_google_meet_toggled(self, switch, _pspec) -> None:
+        active = switch.get_active()
+        self._settings.video_google_meet_mode = active
+        self._settings.save()
+        if hasattr(self, "video_meet_hint_label"):
+            self.video_meet_hint_label.set_visible(active)
+        if hasattr(self, "video_url_entry"):
+            self.video_url_entry.set_visible(active)
+            if not active:
+                self.video_url_entry.set_text("")
+        if hasattr(self, "video_topics_button"):
+            self.video_topics_button.set_label(
+                "▶ Analisar reunião (Meet)" if active else "▶ Gerar tópicos"
+            )
+        self._update_video_topics_button()
+
+    def _on_video_url_changed(self, _entry) -> None:
+        self._update_video_topics_button()
 
     def _read_openrouter_key_from_prefs(self) -> str | None:
         from .meeting_summary_ai import sanitize_api_key
@@ -1810,15 +1876,42 @@ class ListenGUI(Adw.Application):
                 "ffmpeg não encontrado. Instale: sudo apt install ffmpeg"
             )
             return
-        if self._selected_video_path is None:
-            self._open_video_file_chooser()
+        meet_mode = bool(
+            getattr(self, "video_google_meet_switch", None)
+            and self.video_google_meet_switch.get_active()
+        )
+        url = ""
+        if meet_mode and hasattr(self, "video_url_entry"):
+            url = self.video_url_entry.get_text().strip()
+
+        if url:
+            if not yt_dlp_available():
+                self.status_label.set_text(
+                    "yt-dlp não encontrado. No terminal: pip install -e ."
+                )
+                return
+            try:
+                normalized_url = ensure_media_download_url(url)
+            except ValueError as exc:
+                self.status_label.set_text(str(exc))
+                return
+            self._start_video_url_analysis(normalized_url)
             return
-        if not self._ensure_ai_ready_for_media():
+
+        if self._selected_video_path is None:
+            if meet_mode:
+                self.status_label.set_text(
+                    "Cole o link do Google Drive da gravação ou escolha um vídeo local."
+                )
+            else:
+                self._open_video_file_chooser()
+            return
+        if not meet_mode and not self._ensure_ai_ready_for_media():
             return
 
         self._start_video_analysis(self._selected_video_path)
 
-    def _start_video_analysis(self, video_path: Path) -> None:
+    def _start_video_url_analysis(self, url: str) -> None:
         save_dir = self._resolved_save_directory()
         if save_dir is None:
             self.status_label.set_text(
@@ -1830,16 +1923,68 @@ class ListenGUI(Adw.Application):
         self._video_processing = True
         self._update_video_topics_button()
         self.action_button.set_sensitive(False)
-        self.status_label.set_text(f"Analisando vídeo: {video_path.name}…")
+        self.status_label.set_text("A descarregar vídeo do link…")
         self.video_result_label.set_text(
-            "Extraindo áudio, transcrevendo e separando tópicos. Isso pode levar vários minutos."
+            "Modo Google Meet: download automático e transcricao.txt com timestamps. "
+            "Pode levar vários minutos."
         )
+        self._show_page("video")
+
+        language_hint = self._settings.resolved_whisper_force_language()
+
+        def worker() -> None:
+            try:
+                transcribers = self._transcriber
+                if transcribers is None:
+                    raise RuntimeError("modelo não disponível")
+                out = analyze_url_google_meet(
+                    url,
+                    transcribers,
+                    save_dir,
+                    language=language_hint,
+                )
+                GLib.idle_add(self._on_meeting_video_complete, None, str(out))
+            except Exception as exc:
+                GLib.idle_add(self._on_meeting_video_complete, str(exc), "")
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _start_video_analysis(self, video_path: Path) -> None:
+        save_dir = self._resolved_save_directory()
+        if save_dir is None:
+            self.status_label.set_text(
+                "Defina uma pasta de salvamento (menu Configurações)."
+            )
+            return
+
+        meet_mode = bool(
+            getattr(self, "video_google_meet_switch", None)
+            and self.video_google_meet_switch.get_active()
+        )
+
+        self._media_job_kind = "video"
+        self._video_processing = True
+        self._update_video_topics_button()
+        self.action_button.set_sensitive(False)
+        self.status_label.set_text(f"Analisando vídeo: {video_path.name}…")
+        if meet_mode:
+            self.video_result_label.set_text(
+                "Modo Google Meet: a transcrever com timestamps por frase. "
+                "Pode levar vários minutos."
+            )
+        else:
+            self.video_result_label.set_text(
+                "Extraindo áudio, transcrevendo e separando tópicos. "
+                "Isso pode levar vários minutos."
+            )
         self._show_page("video")
 
         language_hint = self._settings.resolved_whisper_force_language()
         self._sync_openrouter_prefs_to_settings()
         ai_opts = self._meeting_ai_options()
-        if ai_opts.enabled:
+        if meet_mode:
+            ai_opts = None
+        elif ai_opts.enabled:
             backend = self._describe_ai_backend(ai_opts)
             is_cursor = (ai_opts.provider or "").strip().lower() == "cursor"
             if not is_cursor and not ai_opts.api_key and not os.environ.get(
@@ -1857,6 +2002,8 @@ class ListenGUI(Adw.Application):
                     f"A gerar indice.txt via {backend} após a transcrição."
                 )
 
+        meet_mode_worker = meet_mode
+
         def worker() -> None:
             try:
                 transcribers = self._transcriber
@@ -1869,6 +2016,7 @@ class ListenGUI(Adw.Application):
                     language=language_hint,
                     gap_seconds=10.0,
                     ai_summary_options=ai_opts,
+                    google_meet_mode=meet_mode_worker,
                 )
                 GLib.idle_add(self._on_meeting_video_complete, None, str(out))
             except Exception as exc:
@@ -1892,10 +2040,13 @@ class ListenGUI(Adw.Application):
                 ai_note = "indice.txt via Cursor Agent (local). "
             else:
                 ai_note = "indice.txt via OpenRouter. "
-        ok_msg = (
-            f'Consulte "indice.txt" ({ai_note}se activou IA em Configurações). '
-            "Cada tópico também tem o seu .txt numerado."
-        )
+        if self._media_job_kind == "video" and self._settings.video_google_meet_mode:
+            ok_msg = 'Modo Google Meet: consulte "transcricao.txt" na pasta gerada.'
+        else:
+            ok_msg = (
+                f'Consulte "indice.txt" ({ai_note}se activou IA em Configurações). '
+                "Cada tópico também tem o seu .txt numerado."
+            )
 
         if error:
             self.status_label.set_text(f"Erro ao processar: {error}")

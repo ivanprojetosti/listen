@@ -27,6 +27,7 @@ class ListenSettings:
     auto_copy: bool = True
     save_transcriptions: bool = True
     meeting_mode: bool = False
+    video_google_meet_mode: bool = False
     language: str | None = None  # legado; não usar para gravar — ver migração em load()
     whisper_force_language: str | None = None
     translation_target: str | None = "pt-br"

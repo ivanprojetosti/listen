@@ -438,6 +438,14 @@ Examples:
         metavar="URL",
         help="Baixa um vídeo do YouTube (yt-dlp), transcreve e salva tópicos como em --meeting-video",
     )
+    meeting.add_argument(
+        "--meeting-url",
+        metavar="URL",
+        help=(
+            "Link do vídeo (Google Drive da gravação Meet, YouTube, …). "
+            "Com --google-meet-mode separa por participante; senão, tópicos por pausa"
+        ),
+    )
 
     parser.add_argument(
         "--topic-gap",
@@ -445,6 +453,15 @@ Examples:
         default=10.0,
         metavar="SEC",
         help="Pausa mínima entre falas (s) para novo tópico (com --meeting-video ou --meeting-youtube)",
+    )
+
+    parser.add_argument(
+        "--google-meet-mode",
+        action="store_true",
+        help=(
+            "Com --meeting-video: separa a transcrição por participante "
+            "(identificação pelo vídeo Meet + diarização de áudio)"
+        ),
     )
 
     parser.add_argument(
@@ -562,6 +579,7 @@ Examples:
         and not args.show_config
         and not args.meeting_video
         and not args.meeting_youtube
+        and not args.meeting_url
         and not args.test_cursor
     )
 
@@ -619,20 +637,25 @@ Examples:
 
     quick_auto_copy = settings.auto_copy if not args.no_copy else False
 
-    if (args.meeting_video or args.meeting_youtube) and (
+    if (args.meeting_video or args.meeting_youtube or args.meeting_url) and (
         args.topic_gap < 0.5 or args.topic_gap > 300
     ):
         console.print("[red]--topic-gap deve estar entre 0.5 e 300 segundos[/red]")
         sys.exit(1)
 
-    if args.meeting_video or args.meeting_youtube:
+    if args.meeting_video or args.meeting_youtube or args.meeting_url:
         from .meeting_analysis import (
+            analyze_url_google_meet,
             analyze_video_to_topics,
             analyze_youtube_to_topics,
+            analyze_media_to_topics,
+            download_media_from_url,
+            ensure_media_download_url,
             ensure_youtube_download_url,
             ffmpeg_available,
             yt_dlp_available,
         )
+        import tempfile
         from .meeting_summary_ai import MeetingAISummaryOptions
 
         if not ffmpeg_available():
@@ -669,7 +692,49 @@ Examples:
                 cursor_model=settings_mv.cursor_model,
             )
 
-            if args.meeting_youtube:
+            if args.meeting_url:
+                try:
+                    media_url = ensure_media_download_url(args.meeting_url)
+                except ValueError as exc:
+                    console.print(f"[red]{exc}[/red]")
+                    sys.exit(1)
+                meet_mode = bool(
+                    args.google_meet_mode or settings_mv.video_google_meet_mode
+                )
+                if meet_mode:
+                    console.print(
+                        f"[dim]Modo Google Meet: a descarregar e analisar o link…[/dim]"
+                    )
+                    ai_opts = None
+                    out_dir = analyze_url_google_meet(
+                        media_url,
+                        tr,
+                        out_base,
+                        language=lang,
+                    )
+                else:
+                    console.print(
+                        f"[dim]A descarregar vídeo do link e transcrever…[/dim]\n"
+                        f"[dim]Pausa para novo tópico: {args.topic_gap:g} s[/dim]"
+                    )
+                    with tempfile.TemporaryDirectory() as tmpdir:
+                        from pathlib import Path
+
+                        media_path, title = download_media_from_url(
+                            media_url, Path(tmpdir)
+                        )
+                        out_dir = analyze_media_to_topics(
+                            media_path,
+                            tr,
+                            out_base,
+                            folder_stem=title,
+                            language=lang,
+                            gap_seconds=args.topic_gap,
+                            source_video=media_path,
+                            source_url=media_url,
+                            ai_summary_options=ai_opts,
+                        )
+            elif args.meeting_youtube:
                 if not yt_dlp_available():
                     console.print(
                         "[red]yt-dlp não encontrado neste ambiente. "
@@ -692,6 +757,9 @@ Examples:
                     language=lang,
                     gap_seconds=args.topic_gap,
                     ai_summary_options=ai_opts,
+                    google_meet_mode=bool(
+                        args.google_meet_mode or settings_mv.video_google_meet_mode
+                    ),
                 )
             else:
                 video_path = Path(args.meeting_video).expanduser()
@@ -699,10 +767,20 @@ Examples:
                     console.print(f"[red]Arquivo não encontrado: {video_path}[/red]")
                     sys.exit(1)
 
-                console.print(
-                    f"[dim]Extraindo áudio e transcrevendo [cyan]{video_path.name}[/cyan]...[/dim]\n"
-                    f"[dim]Pausa para novo tópico: {args.topic_gap:g} s[/dim]"
+                meet_mode = bool(
+                    args.google_meet_mode or settings_mv.video_google_meet_mode
                 )
+                if meet_mode:
+                    console.print(
+                        f"[dim]Modo Google Meet: [cyan]{video_path.name}[/cyan] "
+                        "(transcricao.txt com timestamps)...[/dim]"
+                    )
+                    ai_opts = None
+                else:
+                    console.print(
+                        f"[dim]Extraindo áudio e transcrevendo [cyan]{video_path.name}[/cyan]...[/dim]\n"
+                        f"[dim]Pausa para novo tópico: {args.topic_gap:g} s[/dim]"
+                    )
                 out_dir = analyze_video_to_topics(
                     video_path,
                     tr,
@@ -710,6 +788,7 @@ Examples:
                     language=lang,
                     gap_seconds=args.topic_gap,
                     ai_summary_options=ai_opts,
+                    google_meet_mode=meet_mode,
                 )
         except Exception as exc:
             console.print(f"[red]Erro: {exc}[/red]")
@@ -720,14 +799,27 @@ Examples:
         )
         footer_ai = (
             "\n[dim]Resumo IA pedido à OpenAI — ver secção «Resumo gerado por IA» no indice.txt.[/dim]"
-            if ai_opts.enabled
+            if ai_opts is not None and ai_opts.enabled
             else ""
         )
+        if (
+            args.meeting_url
+            or args.meeting_video
+            or (
+                args.meeting_youtube
+                and (args.google_meet_mode or settings_mv.video_google_meet_mode)
+            )
+        ) and (args.google_meet_mode or settings_mv.video_google_meet_mode):
+            done_hint = 'Abra [bold]transcricao.txt[/bold] na pasta gerada.'
+        else:
+            done_hint = (
+                "Abra [bold]indice.txt[/bold] e os arquivos numerados por tópico."
+            )
         console.print(
             Panel(
                 f"[green]Concluído[/green]\n\n"
                 f"Pasta: [cyan]{out_dir}[/cyan]\n"
-                f"Abra [bold]indice.txt[/bold] e os arquivos numerados por tópico.\n\n"
+                f"{done_hint}\n\n"
                 f"{footer_topics}{footer_ai}",
                 border_style="green",
             )
